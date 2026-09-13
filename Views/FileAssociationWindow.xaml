@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="CelesteViewer.Views.FileAssociationWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Title="文件关联">
+
+    <!--
+      文件关联窗口。从主界面左下角「文件关联」按钮弹出（就在「关于」旁边）。
+
+      做法和 CelesteMusicPlayer 的那个窗口一致：
+        按类别分组列出全部能打开的格式，用户勾哪些就把哪些的"双击打开"指向本程序，
+        没勾的不动；底部「应用」才真正写注册表，「关闭」直接走人。
+
+      样式上跟「关于」窗口同一套深色卡片（#FF1C1C1C + #FF242424），
+      这样三个弹窗（关于 / 属性 / 文件关联）摆在一起是一家人。
+    -->
+    <Grid x:Name="Root" Background="#FF1C1C1C" RequestedTheme="Dark"
+          KeyDown="Root_KeyDown">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>   <!-- 自绘标题栏 -->
+            <RowDefinition Height="*"/>      <!-- 格式清单 -->
+            <RowDefinition Height="Auto"/>   <!-- 底部按钮 -->
+        </Grid.RowDefinitions>
+
+        <!--
+          标题栏。右侧留 138 给系统画的三个按钮（最小化被关了，但位置还是占着），
+          不然标题文字会钻到按钮底下。
+        -->
+        <Grid x:Name="AppTitleBar"
+              Grid.Row="0"
+              Height="44"
+              Padding="16,0,138,0"
+              Background="Transparent">
+            <StackPanel Orientation="Horizontal" Spacing="9" VerticalAlignment="Center">
+                <!-- E8A5 = 链接，和 MusicPlayer 那个窗口同一个图标 -->
+                <FontIcon Glyph="&#xE8A5;" FontSize="16" Foreground="#CCFFFFFF"/>
+                <TextBlock Text="文件关联" FontSize="14" FontWeight="SemiBold"
+                           Foreground="#EEFFFFFF" VerticalAlignment="Center"/>
+            </StackPanel>
+        </Grid>
+
+        <ScrollViewer Grid.Row="1"
+                      VerticalScrollBarVisibility="Auto"
+                      Padding="18,2,18,10">
+            <StackPanel Spacing="16">
+
+                <!-- ===== 说明 + 当前状态 ===== -->
+                <Border Background="#FF242424" BorderBrush="#1AFFFFFF" BorderThickness="1"
+                        CornerRadius="10" Padding="14,12">
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="图片格式关联" FontSize="13.5" FontWeight="SemiBold"
+                                   Foreground="#F0FFFFFF"/>
+                        <TextBlock FontSize="12" Foreground="#B4FFFFFF"
+                                   TextWrapping="Wrap" LineHeight="19"
+                                   Text="打开下面你希望交给 CelesteViewer 打开的格式；没打开的格式不会被改动，也不会抢走别的程序的关联。"/>
+                        <!-- 当前版本能不能做关联 / 关联指到了哪个程序：由 RefreshStatus() 填 -->
+                        <TextBlock x:Name="StatusText" FontSize="11.5"
+                                   TextWrapping="Wrap" LineHeight="18"
+                                   Visibility="Collapsed"/>
+                        <!-- 只在"当前是调试/打包版，做不了关联"时出现 -->
+                        <Button x:Name="PickExecutableButton"
+                                Content="手动选择程序文件…"
+                                FontSize="11.5" Padding="10,4"
+                                HorizontalAlignment="Left"
+                                Visibility="Collapsed"
+                                Click="PickExecutableButton_Click"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- ===== 快捷选择 + 已选数量 ===== -->
+                <Border Background="#FF242424" BorderBrush="#1AFFFFFF" BorderThickness="1"
+                        CornerRadius="10" Padding="14,12">
+                    <StackPanel Spacing="9">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="选择要关联的格式"
+                                       FontSize="13.5" FontWeight="SemiBold"
+                                       Foreground="#F0FFFFFF" VerticalAlignment="Center"/>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
+                                <Button Content="全选" FontSize="11.5" Padding="9,4"
+                                        Click="SelectAllButton_Click"/>
+                                <Button Content="全不选" FontSize="11.5" Padding="9,4"
+                                        Click="SelectNoneButton_Click"/>
+                                <Button Content="恢复推荐" FontSize="11.5" Padding="9,4"
+                                        Click="SelectRecommendedButton_Click"/>
+                            </StackPanel>
+                        </Grid>
+                        <TextBlock x:Name="SelectionSummaryText" FontSize="11.5"
+                                   Foreground="#8CFFFFFF"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- 各分组的开关行由 BuildGroups() 生成 -->
+                <StackPanel x:Name="GroupHost" Spacing="14"/>
+
+                <!-- ===== Windows 默认应用说明 ===== -->
+                <Border Background="#FF242424" BorderBrush="#1AFFFFFF" BorderThickness="1"
+                        CornerRadius="10" Padding="14,12">
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Windows 默认应用" FontSize="13.5" FontWeight="SemiBold"
+                                   Foreground="#F0FFFFFF"/>
+                        <TextBlock FontSize="11.5" Foreground="#96FFFFFF"
+                                   TextWrapping="Wrap" LineHeight="18"
+                                   Text="Windows 只会对「还没设过默认程序」的格式自动采用本程序。已经设过默认程序的格式（比如你之前用「打开方式」选过别的看图器），注册后仍需到系统设置里手动改一次 —— 这是 Windows 的限制，不是注册失败。"/>
+                        <Button Content="打开 Windows「默认应用」设置"
+                                FontSize="11.5" Padding="10,4"
+                                HorizontalAlignment="Left"
+                                Click="OpenDefaultAppsButton_Click"/>
+                    </StackPanel>
+                </Border>
+
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- ===== 底部：提示 + 三个按钮 ===== -->
+        <Border Grid.Row="2"
+                Background="#FF171717"
+                BorderBrush="#1AFFFFFF"
+                BorderThickness="0,1,0,0"
+                Padding="16,10">
+            <Grid ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name="AppliedHintText"
+                           Grid.Column="0"
+                           FontSize="11.5"
+                           Foreground="#8CFFFFFF"
+                           VerticalAlignment="Center"
+                           TextWrapping="Wrap"/>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8"
+                            VerticalAlignment="Center">
+                    <Button x:Name="UnregisterAllButton" Content="全部取消关联"
+                            FontSize="11.5" Padding="10,5"
+                            Click="UnregisterAllButton_Click"/>
+                    <Button x:Name="CloseButton" Content="关闭"
+                            FontSize="11.5" Padding="12,5"
+                            Click="CloseButton_Click"/>
+                    <Button x:Name="ApplyButton" Content="应用"
+                            FontSize="11.5" Padding="14,5"
+                            Style="{StaticResource AccentButtonStyle}"
+                            Click="ApplyButton_Click"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

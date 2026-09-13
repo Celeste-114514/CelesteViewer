@@ -1,0 +1,18 @@
+# 构建产物
+bin/
+obj/
+[Bb]in/
+[Oo]bj/
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# 回滚备份（改代码前手动留的旧版本，不进仓库）
+*.bak
+*.bak_*
+
+# 发布中间产物
+publish/
+*.log

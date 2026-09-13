@@ -1,0 +1,172 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!--
+      ===== 统一 net9 =====
+      原因：WindowsAppSDK 2.4.0 里的 WinRT.Runtime 2.3.1 要求 System.Runtime 9.0.0.0，
+      net8 项目只提供 8.0.0.0，会报 CS1705（在 CelesteVideoPlayer 上实测踩到）。
+      三个 Celeste 项目（Music / Viewer / VideoPlayer）统一到 net9。
+
+      平台版本用 26100 而不是模板默认的 19041：
+      本机实际装的 Windows SDK 只有 22621 / 26100 / 28000，没有 19041，
+      填 19041 在命令行构建时会报 "Could not read the Windows SDK's Platform.xml"。
+    -->
+    <TargetFramework>net9.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <WindowsSdkPackageVersion>10.0.26100.87</WindowsSdkPackageVersion>
+    <RootNamespace>CelesteViewer</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x86;x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x86;win-x64;win-arm64</RuntimeIdentifiers>
+    <PublishProfile>win-$(Platform).pubxml</PublishProfile>
+    <UseWinUI>true</UseWinUI>
+    <WinUISDKReferences>false</WinUISDKReferences>
+    <Nullable>enable</Nullable>
+
+    <!--
+      版本号：关于窗口直接读它显示，改版本只改这一处。
+      日期式版本（26.9.13 = 2026 年 9 月 13 日），和 CelesteMusicPlayer 那边的习惯一致。
+    -->
+    <Version>26.9.14.0</Version>
+
+    <!--
+      ===== MSIX 打包工具链：关掉 =====
+      本程序走"恒定非打包"运行（见下面 WindowsPackageType=None）。
+      单项目 MSIX 打包工具链只剩下副作用：它会让 VS 的设计时构建多跑一整套
+      AppX / PRI 相关的 target，那正是 "WMC9999 Invalid metadata token Module(0x0)"
+      这类设计时报错的温床（命令行构建一直是干净的，只有 VS 里会）。
+      这一段是从 CelesteMediaPlayer 原样搬过来的，那边的坑在这边一样会踩。
+    -->
+    <EnableMsixTooling>false</EnableMsixTooling>
+
+    <!--
+      ===== 非打包运行（让 exe 能被双击、能被图片文件关联直接拉起）=====
+      WindowsAppSdkDeploymentManagerInitialize=false 是必须的：
+      非打包模式下它默认开启，启动时先去"自动部署 Windows App Runtime"，
+      找不到对应 COM 注册（DDLM 包）就直接抛 0x80040154「没有注册类」，进程秒退。
+      表现就是"右键用本程序打开图片，完全没反应"。
+    -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSdkDeploymentManagerInitialize>false</WindowsAppSdkDeploymentManagerInitialize>
+  </PropertyGroup>
+
+  <!--
+    主项目刻意不设 RuntimeIdentifier：
+    XamlCompiler 对输出路径很敏感，加上 RID 会多出一层 win-x64 目录，
+    有概率触发它崩。native 库复制的事交给 CelesteViewer.Core 自己处理。
+  -->
+
+  <!--
+    ===== 程序图标 =====
+
+    ApplicationIcon 决定 exe 自己的图标（资源管理器里看到的、任务栏钉住的）——
+    这是唯一能改 exe 图标的地方，运行时改不了。
+    窗口左上角那个小图标和任务栏图标是另一回事，靠 MainWindow 里的 AppWindow.SetIcon。
+
+    AppIcon.png 要给标题栏用（Image 控件的 Source），所以必须复制到输出目录；
+    ico 也是，因为 SetIcon 是读文件路径的。
+    风格和 CelesteMusicPlayer 保持一致：圆角方形 + 青蓝垂直渐变 + 白色图形。
+  -->
+  <PropertyGroup>
+    <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="Assets\AppIcon.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Assets\AppIcon.png" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Assets\AppIconSource.png" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Assets\SplashScreen.scale-200.png" />
+    <Content Include="Assets\LockScreenLogo.scale-200.png" />
+    <Content Include="Assets\Square150x150Logo.scale-200.png" />
+    <Content Include="Assets\Square44x44Logo.scale-200.png" />
+    <Content Include="Assets\Square44x44Logo.targetsize-24_altform-unplated.png" />
+    <Content Include="Assets\StoreLogo.png" />
+    <Content Include="Assets\Wide310x150Logo.scale-200.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Manifest Include="$(ApplicationManifest)" />
+  </ItemGroup>
+
+  <!--
+    Defining the "Msix" ProjectCapability here allows the Single-project MSIX Packaging
+    Tools extension to be activated for this project even if the Windows App SDK Nuget
+    package has not yet been restored.
+  -->
+  <ItemGroup Condition="'$(DisableMsixProjectCapabilityAddedByProject)'!='true' and '$(EnableMsixTooling)'=='true'">
+    <ProjectCapability Include="Msix" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
+  </ItemGroup>
+
+  <!--
+    解码、缩略图、EXIF 全部放在 CelesteViewer.Core 类库里。
+
+    为什么非要拆出去：Magick.NET 会把它的 native 解码库塞进 MSBuild 的 items 列表，
+    而 WinUI 的 XamlCompiler 一看到不认识的 item 就直接崩（报 output.json was not created
+    或 WMC9999）。在 CelesteMediaPlayer 那边，让 .ico 进 items 时踩过一模一样的坑。
+    放进类库之后，那些 items 只存在于类库内部，主项目的 XamlCompiler 看不见。
+  -->
+  <ItemGroup>
+    <ProjectReference Include="CelesteViewer.Core\CelesteViewer.Core.csproj" />
+  </ItemGroup>
+
+  <!--
+    ===== 必须排除：CelesteViewer.Core 是本项目的子目录 =====
+
+    SDK 默认的源码通配是 `**/*.cs`，而它只排除"本项目自己的" obj\ 和 bin\。
+    CelesteViewer.Core 是主项目目录下的**子目录**，不在排除范围内，于是：
+
+      1. Core 的源码被主项目又编译了一遍 → 同一批类型在
+         CelesteViewer.dll 和 CelesteViewer.Core.dll 里各存在一份
+      2. 更糟的是 Core 的 obj\ 生成物（CelesteViewer.Core.AssemblyInfo.cs）也一起
+         被编译进来 → 与主项目自己的 AssemblyInfo.cs 撞车，
+         报一堆 CS0579「特性重复」（AssemblyCompanyAttribute 等）
+
+    这个坑很阴：全量清理后第一次构建是好的（通配在 obj 生成之前就定型了），
+    第二次构建才炸 —— 排查时极易误判成项目配置坏了。
+
+    Debug 和 Release 都要有，所以这里不限定 Configuration。
+  -->
+  <ItemGroup>
+    <Compile Remove="CelesteViewer.Core\**\*.cs" />
+    <None Remove="CelesteViewer.Core\**" />
+    <Content Remove="CelesteViewer.Core\**" />
+    <Page Remove="CelesteViewer.Core\**" />
+    <PRIResource Remove="CelesteViewer.Core\**" />
+    <EmbeddedResource Remove="CelesteViewer.Core\**" />
+    <ApplicationDefinition Remove="CelesteViewer.Core\**" />
+    <Manifest Remove="CelesteViewer.Core\**" />
+  </ItemGroup>
+
+  <!--
+    Defining the "HasPackageAndPublishMenuAddedByProject" property here allows the Solution
+    Explorer "Package and Publish" context menu entry to be enabled for this project even if
+    the Windows App SDK Nuget package has not yet been restored.
+  -->
+  <PropertyGroup Condition="'$(DisableHasPackageAndPublishMenuAddedByProject)'!='true' and '$(EnableMsixTooling)'=='true'">
+    <HasPackageAndPublishMenu>true</HasPackageAndPublishMenu>
+  </PropertyGroup>
+
+  <!-- Publish Properties -->
+  <PropertyGroup>
+    <PublishReadyToRun Condition="'$(Configuration)' == 'Debug'">False</PublishReadyToRun>
+    <PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">True</PublishReadyToRun>
+
+    <!--
+      裁剪（PublishTrimmed）只在"自包含"发布下有效；框架依赖发布开它会直接报
+      NETSDK1102（所选发布配置不支持优化程序集的大小）。
+
+      第一版安装包走**框架依赖**（和 CelesteMusicPlayer 一致：装完体积小，
+      缺 .NET 9 运行时由安装程序提示用户去装）。所以这里按 SelfContained 自动决定，
+      将来哪天要发自包含版本，命令行加上 -p:SelfContained=true 即可，不用再改这个文件。
+    -->
+    <PublishTrimmed Condition="'$(SelfContained)' != 'true'">False</PublishTrimmed>
+    <PublishTrimmed Condition="'$(Configuration)' != 'Debug' and '$(SelfContained)' == 'true'">True</PublishTrimmed>
+  </PropertyGroup>
+</Project>

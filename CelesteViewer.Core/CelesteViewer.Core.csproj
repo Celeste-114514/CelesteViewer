@@ -1,0 +1,62 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <!-- 与 CelesteVideoPlayer 保持一致：本机没装 19041 版 Windows SDK（只有 22621/26100/28000），
+         填 19041 会在命令行构建时报 "读不到 Platform.xml"。 -->
+    <WindowsSdkPackageVersion>10.0.26100.87</WindowsSdkPackageVersion>
+    <RootNamespace>CelesteViewer.Core</RootNamespace>
+    <Nullable>enable</Nullable>
+    <Platforms>x86;x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x86;win-x64;win-arm64</RuntimeIdentifiers>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+
+    <!--
+      这里是普通类库，**不开 WinUI**。
+
+      这么拆分是被逼出来的，但拆完发现是对的：
+      Magick.NET 会把它的 native 解码库（Magick.Native-Q8-x64.dll）塞进 MSBuild 的
+      items 列表，而 WinUI 的 XamlCompiler 一看到不认识的 item 就会直接崩
+      （在 CelesteMediaPlayer 那边让 .ico 进 items 时踩过一模一样的坑，
+       报的是 output.json was not created / WMC9999）。
+      把 Magick.NET 关在这个类库里，XamlCompiler 在主项目里就看不见它了。
+
+      附带好处：
+        1. 解码逻辑不碰任何 XAML，可以单独用控制台程序跑压测
+        2. 将来做视频播放器、做三合一合并时，这一层可以直接复用
+    -->
+    <UseWinUI>false</UseWinUI>
+    <EnableMsixTooling>false</EnableMsixTooling>
+  </PropertyGroup>
+
+  <!--
+    ===== 关于 Magick.NET 的 native 库复制 =====
+    不需要在这里设 <RuntimeIdentifier>（单数）。
+
+    实测：项目里有 <RuntimeIdentifiers>（复数，白名单）+ WindowsAppSDK，
+    主项目构建出来就已经是 RID 专属输出（bin\x64\Debug\...\win-x64\），
+    并且 Magick.Native-Q8-x64.dll 会自动复制到那个目录，直接用就行。
+
+    曾经以为"没有单数 RID 就不复制 native 库"，还照此加过一段
+    <RuntimeIdentifier> 条件配置 —— 那次改完程序启动崩溃，我就把锅算在 RID 头上，
+    其实完全无关（真正的原因是主项目把本类库的 obj 生成物也编译了一遍，
+    见 CelesteViewer.csproj 里那段 Compile Remove 的说明）。
+    RID 单数配置已删除，保持和 CelesteMediaPlayer 一致的写法。
+  -->
+
+  <ItemGroup>
+    <!--
+      兜底解码器。日常格式的 jpg/png/webp 走系统 WIC，根本用不到它，
+      它只负责 heic / avif / psd / 相机 RAW 这些 WIC 解不了的。
+      选 Q8 不选 Q16：屏幕本来也只能显示 8 位色深，Q16 只是更慢更大。
+    -->
+    <PackageReference Include="Magick.NET-Q8-AnyCPU" Version="14.17.1" />
+
+    <!-- 读 EXIF：相机、镜头、光圈、快门、ISO、焦距、拍摄时间 -->
+    <PackageReference Include="MetadataExtractor" Version="2.9.3" />
+
+    <!-- 压缩包里直接看图（zip / cbz / 7z）。RAR 是非自由格式，不打算支持 -->
+    <PackageReference Include="SharpCompress" Version="1.0.0" />
+  </ItemGroup>
+</Project>

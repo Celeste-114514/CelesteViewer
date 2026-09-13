@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="CelesteViewer.Views.PhotoWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Title="CelesteViewer">
+
+    <!--
+      独立看图窗口。
+
+      和主窗口一样只当"舞台"：真正的内容是 ViewerPage，在代码里动态塞进来。
+      这么做的好处是看图页只有一份代码 —— 在主窗口里看、在独立窗口里看，
+      走的是同一套逻辑，不会出现"两个界面功能对不上"的情况。
+    -->
+    <Grid x:Name="Host"/>
+</Window>

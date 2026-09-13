@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="CelesteViewer.Views.PropertiesWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Title="属性">
+
+    <!--
+      图片属性窗口。
+
+      从缩略图墙右键「属性」弹出，居中显示这一张图的信息：
+      文件名 / 路径 / 类型 / 尺寸 / 体积 / 修改时间 / 拍摄参数(EXIF) / 解码器。
+      拍不到的参数（比如没有 EXIF 的截图）直接不显示那一行，不会留空行。
+
+      和「关于」窗口不同，这是个正经对话框：标题栏带正常的关闭按钮，
+      也能按 Esc 关。底部「确定」只是给鼠标用户一个明显的出口。
+    -->
+    <Grid x:Name="Root" Background="#FF1C1C1C" RequestedTheme="Dark"
+          KeyDown="Root_KeyDown">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <ScrollViewer Grid.Row="0" Padding="20,18,20,8"
+                      VerticalScrollBarVisibility="Auto">
+            <StackPanel Spacing="12">
+                <!-- 抬头：文件名 -->
+                <TextBlock x:Name="NameText" FontSize="15" FontWeight="SemiBold"
+                           Foreground="#F2FFFFFF" TextTrimming="CharacterEllipsis"
+                           TextWrapping="Wrap"/>
+
+                <!-- 明细行都在这块里由代码动态填（拍不到的参数就直接不出现） -->
+                <StackPanel x:Name="Details" Spacing="9"/>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- 底部按钮条 -->
+        <Border Grid.Row="1"
+                Background="#FF171717"
+                BorderBrush="#1AFFFFFF"
+                BorderThickness="0,1,0,0"
+                Padding="18,11">
+            <StackPanel Orientation="Horizontal" Spacing="9" HorizontalAlignment="Right">
+                <Button x:Name="CopyPathButton"
+                        Click="CopyPathButton_Click"
+                        Padding="12,6"
+                        ToolTipService.ToolTip="复制文件完整路径">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <FontIcon Glyph="&#xE8C8;" FontSize="13"/>
+                        <TextBlock Text="复制路径" FontSize="12"/>
+                    </StackPanel>
+                </Button>
+                <Button x:Name="OpenButton"
+                        Click="OpenButton_Click"
+                        Padding="12,6"
+                        ToolTipService.ToolTip="在资源管理器里打开这张图所在的文件夹并选中它">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <FontIcon Glyph="&#xE838;" FontSize="13"/>
+                        <TextBlock Text="在资源管理器中打开" FontSize="12"/>
+                    </StackPanel>
+                </Button>
+                <Button x:Name="OkButton"
+                        Click="OkButton_Click"
+                        MinWidth="88"
+                        Style="{StaticResource AccentButtonStyle}">
+                    确定
+                </Button>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

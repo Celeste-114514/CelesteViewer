@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="CelesteViewer.Views.AboutWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Title="关于 CelesteViewer">
+
+    <!--
+      关于窗口。
+
+      两条刻意的"反常规"：
+        1. **没有关闭按钮** —— 系统标题栏上的 X 在代码里被关掉了。
+           想关就点窗口里的「确定」，或者点一下别的地方（窗口失焦即关）。
+           这种"轻"窗口不该让人去找 X，更不该让人去记 Alt+F4。
+        2. **不能缩放、不能最小化** —— 它就是一屏信息，没必要给那些按钮。
+
+      内容分三块（和 CelesteMusicPlayer 的关于页同一套分区）：
+        软件介绍 / 软件更新 / 关于作者
+    -->
+    <Grid x:Name="Root" Background="#FF1C1C1C" RequestedTheme="Dark"
+          KeyDown="Root_KeyDown">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <ScrollViewer Grid.Row="0" Padding="22,20,22,8"
+                      VerticalScrollBarVisibility="Auto">
+            <StackPanel Spacing="14">
+
+                <!-- ===== 抬头：图标 + 名字 + 版本 ===== -->
+                <StackPanel Orientation="Horizontal" Spacing="13">
+                    <Image x:Name="AboutIcon" Width="46" Height="46" VerticalAlignment="Top"/>
+                    <StackPanel VerticalAlignment="Center" Spacing="2">
+                        <TextBlock Text="CelesteViewer" FontSize="18" FontWeight="SemiBold"
+                                   Foreground="#F2FFFFFF"/>
+                        <TextBlock x:Name="VersionText" FontSize="11.5" Foreground="#80FFFFFF"/>
+                    </StackPanel>
+                </StackPanel>
+
+                <!-- ===== 1. 软件介绍 ===== -->
+                <Border Background="#FF242424" BorderBrush="#1AFFFFFF" BorderThickness="1"
+                        CornerRadius="10" Padding="15,13">
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="软件介绍" FontSize="13.5" FontWeight="SemiBold"
+                                   Foreground="#F0FFFFFF"/>
+                        <TextBlock FontSize="12" Foreground="#B4FFFFFF"
+                                   TextWrapping="Wrap" LineHeight="19"
+                                   Text="为本地图片打造的 Windows 看图器。图库浏览、压缩包内直接翻页（zip / cbz）、幻灯片放映、图片编辑（裁剪 / 标记 / 擦除 / 背景 / 调整 / 滤镜）、图上文字识别（OCR）。"/>
+                        <TextBlock FontSize="11.5" Foreground="#78FFFFFF"
+                                   TextWrapping="Wrap" LineHeight="18"
+                                   Text="常见格式走系统自带的 WIC 解码，不额外占体积；HEIC / AVIF / 相机 RAW / PSD / SVG 这类罕见格式由 Magick.NET 兜底。图片处理全部在本机完成、不上传；只有「检查更新」时会联网。"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- ===== 2. 软件更新 ===== -->
+                <Border Background="#FF242424" BorderBrush="#1AFFFFFF" BorderThickness="1"
+                        CornerRadius="10" Padding="15,13">
+                    <StackPanel Spacing="9">
+                        <TextBlock Text="软件更新" FontSize="13.5" FontWeight="SemiBold"
+                                   Foreground="#F0FFFFFF"/>
+
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+
+                            <StackPanel Grid.Column="0" Spacing="4" VerticalAlignment="Center">
+                                <TextBlock x:Name="UpdateVersionText" FontSize="11.5"
+                                           FontWeight="SemiBold" Foreground="#D8FFFFFF"
+                                           Text="版本 —"/>
+                                <TextBlock x:Name="UpdateStatusText" FontSize="11"
+                                           Foreground="#8CFFFFFF" TextWrapping="Wrap"
+                                           LineHeight="17"
+                                           Text="点击「检查更新」看看有没有新版本。"/>
+                                <ProgressBar x:Name="DownloadProgress" Minimum="0" Maximum="100"
+                                             Value="0" Height="3" Visibility="Collapsed"/>
+                            </StackPanel>
+
+                            <StackPanel Grid.Column="1" Spacing="6" VerticalAlignment="Center">
+                                <Button x:Name="CheckUpdateButton" Content="检查更新"
+                                        FontSize="11.5" Padding="12,5"
+                                        Click="CheckUpdateButton_Click"/>
+                                <Button x:Name="DownloadUpdateButton" Content="下载更新"
+                                        FontSize="11.5" Padding="12,5" Visibility="Collapsed"
+                                        Style="{StaticResource AccentButtonStyle}"
+                                        Click="DownloadUpdateButton_Click"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <!-- 新版本的更新说明（GitHub Release 正文），有才显示 -->
+                        <Border x:Name="NotesBox" Visibility="Collapsed"
+                                Background="#FF1A1A1A" BorderBrush="#14FFFFFF" BorderThickness="1"
+                                CornerRadius="7" Padding="11,9" MaxHeight="132">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <TextBlock x:Name="ReleaseNotesText" FontSize="11"
+                                           Foreground="#A8FFFFFF" TextWrapping="Wrap"
+                                           LineHeight="17" IsTextSelectionEnabled="True"/>
+                            </ScrollViewer>
+                        </Border>
+
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="70"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="构建时间" FontSize="11"
+                                       Foreground="#70FFFFFF"/>
+                            <TextBlock x:Name="BuildTimeText" Grid.Column="1" FontSize="11"
+                                       Foreground="#70FFFFFF"/>
+                        </Grid>
+
+                        <HyperlinkButton Content="GitHub Releases ↗" FontSize="11"
+                                         Padding="0,1" NavigateUri="https://github.com/Celeste-114514/CelesteViewer/releases"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- ===== 3. 关于作者 ===== -->
+                <Border Background="#FF242424" BorderBrush="#1AFFFFFF" BorderThickness="1"
+                        CornerRadius="10" Padding="15,13">
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="关于作者" FontSize="13.5" FontWeight="SemiBold"
+                                   Foreground="#F0FFFFFF"/>
+                        <TextBlock FontSize="12" Foreground="#B4FFFFFF"
+                                   TextWrapping="Wrap" LineHeight="19"
+                                   Text="Celeste，一名苦逼大学生。不懂代码，用 AI 写下了这个看图器。要是用着不错，欢迎反馈或请我喝杯咖啡。"/>
+
+                        <HyperlinkButton Content="联系 / 反馈：t.me/celesteabsolomb"
+                                         FontSize="11.5" Padding="0,2"
+                                         NavigateUri="https://t.me/celesteabsolomb"/>
+                        <HyperlinkButton Content="爱发电（请我喝杯咖啡）：afdian.com/a/celeste_114514"
+                                         FontSize="11.5" Padding="0,2"
+                                         NavigateUri="https://afdian.com/a/celeste_114514"/>
+                    </StackPanel>
+                </Border>
+
+                <TextBlock x:Name="CopyrightText"
+                           FontSize="11" Foreground="#52FFFFFF" TextWrapping="Wrap"
+                           Margin="0,2,0,0"/>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- ===== 确定：唯一的主动关闭方式 ===== -->
+        <Border Grid.Row="1"
+                Background="#FF171717"
+                BorderBrush="#1AFFFFFF"
+                BorderThickness="0,1,0,0"
+                Padding="20,12">
+            <Button x:Name="OkButton"
+                    Click="OkButton_Click"
+                    HorizontalAlignment="Right"
+                    MinWidth="92"
+                    Style="{StaticResource AccentButtonStyle}">
+                确定
+            </Button>
+        </Border>
+    </Grid>
+</Window>

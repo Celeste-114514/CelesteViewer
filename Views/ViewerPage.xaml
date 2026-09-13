@@ -1,0 +1,1231 @@
+<Page
+    x:Class="CelesteViewer.Views.ViewerPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:ctrl="using:CelesteViewer.Controls"
+    mc:Ignorable="d"
+    RequestedTheme="Dark">
+
+    <!--
+      看图界面固定深色背景：照片才是主角，界面越不抢戏越好。
+      这也是 Honeyview / Windows 照片应用大图模式的一致做法。
+    -->
+    <Grid x:Name="Root" Background="#FF0E0E0E" AllowDrop="True"
+          DragOver="Root_DragOver" Drop="Root_Drop">
+
+        <!--
+          ===== 图片区：滚轮缩放、按住拖动 =====
+
+          ZoomMode 是 **Disabled**：缩放完全由我们自己算（改图片的宽高 + 偏移量），
+          不用 ScrollViewer 自带的那一套。
+
+          为什么不用它自带的：它的缩放会在内部按"旧缩放"钳一次偏移量，
+          我们算的偏移量是按"新缩放"算的，两边对不上就每帧互相拽 ——
+          表现是"缩放完画面自己回到正中"，怎么调都去不掉。
+          自己算之后，锚点（鼠标底下那个点）是准的，也不会被强行居中。
+
+          图片用 Stretch="Fill" + 代码里给死宽高：宽高比由我们保证正确，
+          好处是"图片多大、滚多远"完全可预测。
+          居中也不靠对齐，而是靠 Margin 补白（内容比视口小的时候才补），
+          这样内容比视口大时不会把左上角切掉。
+        -->
+        <ScrollViewer x:Name="Scroller"
+                      ZoomMode="Disabled"
+                      HorizontalScrollBarVisibility="Auto"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollMode="Auto"
+                      VerticalScrollMode="Auto"
+                      PointerPressed="Scroller_PointerPressed"
+                      PointerReleased="Scroller_PointerReleased">
+            <!--
+              缩放动画期间**不动 ScrollViewer**，只改这个 RenderTransform：
+              RenderTransform 走的是合成层（GPU），既不触发布局也不会让图片重新光栅化；
+              而每帧调 ChangeView 会让它每帧重新算一遍内容范围，画面对不上就是闪烁。
+              滑完之后再把结果一次性交给 ChangeView 落地，同时把这里复位。
+              RenderTransformOrigin 必须是 0,0（左上角），锚点的数学才对得上。
+            -->
+            <Image x:Name="ImageView"
+                   Stretch="Fill"
+                   HorizontalAlignment="Left"
+                   VerticalAlignment="Top"
+                   RenderTransformOrigin="0,0">
+                <Image.RenderTransform>
+                    <TransformGroup>
+                        <ScaleTransform x:Name="ZoomScale" ScaleX="1" ScaleY="1"/>
+                        <TranslateTransform x:Name="ZoomTranslate" X="0" Y="0"/>
+                    </TransformGroup>
+                </Image.RenderTransform>
+            </Image>
+        </ScrollViewer>
+
+        <!-- ===== 顶部标题栏：窗口可拖动，左边是应用图标 + 名称 + 当前文件名 ===== -->
+        <Grid x:Name="TitleBar" Height="44" VerticalAlignment="Top" Background="Transparent">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="9" Margin="16,0,0,0"
+                        VerticalAlignment="Center">
+                <Image x:Name="TitleIcon" Width="16" Height="16" VerticalAlignment="Center"/>
+                <TextBlock Text="CelesteViewer" FontSize="13" FontWeight="SemiBold"
+                           Foreground="#EEFFFFFF" VerticalAlignment="Center"/>
+                <TextBlock x:Name="TitleDot" Text="·" FontSize="13" Foreground="#44FFFFFF"
+                           VerticalAlignment="Center" Visibility="Collapsed"/>
+                <TextBlock x:Name="TitleText"
+                           FontSize="13"
+                           Foreground="#88FFFFFF"
+                           TextTrimming="CharacterEllipsis"
+                           VerticalAlignment="Center"/>
+            </StackPanel>
+
+            <TextBlock x:Name="SizeText"
+                       Grid.Column="1"
+                       VerticalAlignment="Center"
+                       Margin="0,0,140,0"
+                       FontSize="12"
+                       Foreground="#66FFFFFF"/>
+        </Grid>
+
+        <!-- ===== 空状态：还没打开任何图片时 ===== -->
+        <StackPanel x:Name="EmptyState"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Spacing="14">
+            <FontIcon Glyph="&#xEB9F;" FontSize="46" Foreground="#44FFFFFF"
+                      HorizontalAlignment="Center"/>
+            <TextBlock x:Name="EmptyText" Text="把图片拖到这里" FontSize="15" Foreground="#88FFFFFF"
+                       HorizontalAlignment="Center"/>
+            <Button Content="选择图片" Click="OpenFileButton_Click"
+                    HorizontalAlignment="Center"/>
+        </StackPanel>
+
+        <!--
+          ===== 右侧参数面板 =====
+
+          右滑进出靠 RenderTransform（走合成层，不触发布局），
+          面板本身是"覆盖在图片上"的，所以滑入滑出不会影响图片区重新排版。
+          初始 X = 宽度 + 右边距 ＝ 完全缩在窗口右侧外面。
+
+          外观上是一张"浮起来的卡片"，不是贴着边的一条：
+            · 上下各留空隙 —— 上面 52 是为了躲开标题栏右端的系统按钮
+              （最小化/最大化/关闭），不然面板自己的关闭按钮会和它们叠在一起；
+            · 四边圆角 + 四边描边（原来只描左边）；
+            · 背景**不透明**。半透明虽然能透出底下的图、看着"高级"，
+              但图一花字就读不清了，信息面板第一要务是能读。
+        -->
+        <Border x:Name="InfoPanel"
+                Width="300"
+                Margin="0,52,10,68"
+                HorizontalAlignment="Right"
+                VerticalAlignment="Stretch"
+                Background="#FF151515"
+                BorderBrush="#2AFFFFFF"
+                BorderThickness="1"
+                CornerRadius="12"
+                Opacity="0"
+                Visibility="Collapsed">
+            <Border.RenderTransform>
+                <!-- 310 = 宽 300 + 右间距 10，正好滑出可视范围 -->
+                <TranslateTransform x:Name="InfoPanelTranslate" X="310"/>
+            </Border.RenderTransform>
+            <ScrollViewer Padding="18,16">
+                <StackPanel Spacing="3">
+                    <TextBlock Text="文件" FontSize="12" Foreground="#77FFFFFF" Margin="0,0,0,6"/>
+                    <TextBlock x:Name="InfoName" FontSize="13" Foreground="#EEFFFFFF" TextWrapping="Wrap"/>
+                    <TextBlock x:Name="InfoPath" FontSize="11" Foreground="#66FFFFFF" TextWrapping="Wrap" Margin="0,2,0,12"/>
+
+                    <TextBlock Text="图像" FontSize="12" Foreground="#77FFFFFF" Margin="0,0,0,6"/>
+                    <TextBlock x:Name="InfoPixels" FontSize="13" Foreground="#EEFFFFFF"/>
+                    <TextBlock x:Name="InfoFileSize" FontSize="13" Foreground="#EEFFFFFF"/>
+                    <TextBlock x:Name="InfoDecoder" FontSize="12" Foreground="#77FFFFFF" Margin="0,2,0,12"/>
+
+                    <TextBlock Text="拍摄参数" FontSize="12" Foreground="#77FFFFFF" Margin="0,0,0,6"/>
+                    <TextBlock x:Name="InfoCamera" FontSize="13" Foreground="#EEFFFFFF"/>
+                    <TextBlock x:Name="InfoLens" FontSize="13" Foreground="#EEFFFFFF" TextWrapping="Wrap"/>
+                    <TextBlock x:Name="InfoExposure" FontSize="13" Foreground="#EEFFFFFF"/>
+                    <TextBlock x:Name="InfoDate" FontSize="13" Foreground="#EEFFFFFF"/>
+                    <TextBlock x:Name="InfoNoExif" FontSize="12" Foreground="#66FFFFFF"
+                               Text="这张图没有拍摄参数" Visibility="Collapsed"/>
+                </StackPanel>
+            </ScrollViewer>
+        </Border>
+
+        <!--
+          ===== 右侧「风格」面板：滤镜 + 调整 =====
+
+          和参数面板共用同一套右滑动画（RenderTransform，不触发布局），
+          外观也完全一致：不透明底 + 上下留空隙 + 四边圆角（见上面参数面板的注释）。
+          两个面板互斥：开一个自动收另一个，免得右边叠两层把图挤没了。
+
+          滑块不在这里手写 —— 10 个滑块写出来的 XAML 又长又难改，
+          统一在代码里循环生成（BuildAdjustSliders），加一项只改一处。
+        -->
+        <Border x:Name="LookPanel"
+                Width="320"
+                Margin="0,52,10,68"
+                HorizontalAlignment="Right"
+                VerticalAlignment="Stretch"
+                Background="#FF151515"
+                BorderBrush="#2AFFFFFF"
+                BorderThickness="1"
+                CornerRadius="12"
+                Opacity="0"
+                Visibility="Collapsed">
+            <Border.RenderTransform>
+                <!-- 330 = 宽 320 + 右间距 10 -->
+                <TranslateTransform x:Name="LookPanelTranslate" X="330"/>
+            </Border.RenderTransform>
+
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <Grid Grid.Row="0" Margin="16,14,10,10">
+                    <TextBlock Text="风格" FontSize="14" FontWeight="SemiBold"
+                               Foreground="#EEFFFFFF" VerticalAlignment="Center"/>
+                    <Button HorizontalAlignment="Right" Width="32" Height="32" Padding="0"
+                            Background="Transparent" BorderThickness="0"
+                            Click="LookCloseButton_Click" ToolTipService.ToolTip="收起">
+                        <FontIcon Glyph="&#xE711;" FontSize="11"/>
+                    </Button>
+                </Grid>
+
+                <ScrollViewer Grid.Row="1" Padding="16,0">
+                    <StackPanel Spacing="14">
+                        <!-- 自动增强：按这张图自己的直方图算一套参数 -->
+                        <Button x:Name="AutoButton" Click="AutoButton_Click"
+                                HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
+                                Padding="12,9">
+                            <StackPanel Orientation="Horizontal" Spacing="10">
+                                <FontIcon Glyph="&#xE9E9;" FontSize="15"/>
+                                <TextBlock Text="自动增强" FontSize="13"/>
+                            </StackPanel>
+                        </Button>
+
+                        <TextBlock Text="滤镜" FontSize="12" Foreground="#77FFFFFF"/>
+
+                        <!--
+                          滤镜缩略图（三列，代码里生成）。
+                          每张缩略图是**用这张图现算**的 —— 缩小后套上对应滤镜，
+                          所以看到的和实际点下去的效果一致，不是画死的示意图。
+                        -->
+                        <StackPanel x:Name="FilterHost" Spacing="6"/>
+
+                        <Rectangle Height="1" Fill="#22FFFFFF"/>
+
+                        <TextBlock Text="调整" FontSize="12" Foreground="#77FFFFFF"/>
+                        <StackPanel x:Name="SliderHost" Spacing="2"/>
+                    </StackPanel>
+                </ScrollViewer>
+
+                <!-- 底部这条按钮栏是实心底，必须自己收圆角，
+                     否则方块角会把面板的圆角盖掉 -->
+                <Border Grid.Row="2" Background="#FF101010"
+                        BorderBrush="#1AFFFFFF" BorderThickness="0,1,0,0"
+                        CornerRadius="0,0,11,11"
+                        Padding="12,9">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Button Grid.Column="0" x:Name="ResetLookButton"
+                                Click="ResetLookButton_Click"
+                                HorizontalAlignment="Stretch" Margin="0,0,4,0">
+                            <TextBlock Text="重置" FontSize="13"/>
+                        </Button>
+                        <Button Grid.Column="1" x:Name="ApplyLookButton"
+                                Click="ApplyLookButton_Click"
+                                HorizontalAlignment="Stretch" Margin="4,0,0,0"
+                                Style="{StaticResource AccentButtonStyle}">
+                            <TextBlock Text="应用" FontSize="13"/>
+                        </Button>
+                    </Grid>
+                </Border>
+            </Grid>
+        </Border>
+
+        <!--
+          ===== 右侧「文字」面板：OCR 结果 =====
+
+          第三个右侧面板，外观和动画跟前两个完全一致（不透明底 + 上下留空隙 + 圆角），
+          只是宽度给到 380 —— 识出来的是整段文字，窄了每行只剩几个字，读起来很别扭。
+        -->
+        <Border x:Name="OcrPanel"
+                Width="380"
+                Margin="0,52,10,68"
+                HorizontalAlignment="Right"
+                VerticalAlignment="Stretch"
+                Background="#FF151515"
+                BorderBrush="#2AFFFFFF"
+                BorderThickness="1"
+                CornerRadius="12"
+                Opacity="0"
+                Visibility="Collapsed">
+            <Border.RenderTransform>
+                <!-- 390 = 宽 380 + 右间距 10 -->
+                <TranslateTransform x:Name="OcrPanelTranslate" X="390"/>
+            </Border.RenderTransform>
+
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <Grid Grid.Row="0" Margin="16,10,10,2">
+                    <TextBlock Text="图片里的文字" FontSize="14" FontWeight="SemiBold"
+                               Foreground="#EEFFFFFF" VerticalAlignment="Center"/>
+                    <Button HorizontalAlignment="Right" Width="32" Height="32" Padding="0"
+                            Background="Transparent" BorderThickness="0"
+                            Click="OcrCloseButton_Click" ToolTipService.ToolTip="收起">
+                        <FontIcon Glyph="&#xE711;" FontSize="11"/>
+                    </Button>
+                </Grid>
+
+                <!-- 状态行：识别中 / 几行几字 / 没找到字 / 为什么没跑成 -->
+                <TextBlock x:Name="OcrStatus"
+                           Grid.Row="1"
+                           Margin="16,0,16,8"
+                           FontSize="12"
+                           Foreground="#88FFFFFF"
+                           TextWrapping="Wrap"/>
+
+                <!--
+                  结果文本可以点选拖动 —— 识错一两个字时，用户往往只想选那一小段重打，
+                  能直接选中比"复制全部再去别处删"省事得多。
+                -->
+                <ScrollViewer Grid.Row="2" Padding="16,0,16,0">
+                    <TextBlock x:Name="OcrText"
+                               FontSize="13"
+                               Foreground="#DDDDDD"
+                               LineHeight="21"
+                               TextWrapping="Wrap"
+                               IsTextSelectionEnabled="True"/>
+                </ScrollViewer>
+
+                <Border Grid.Row="3" Background="#FF101010"
+                        BorderBrush="#1AFFFFFF" BorderThickness="0,1,0,0"
+                        CornerRadius="0,0,11,11"
+                        Padding="12,9">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Button Grid.Column="0" x:Name="OcrCopyButton"
+                                Click="OcrCopyButton_Click"
+                                HorizontalAlignment="Stretch" Margin="0,0,4,0"
+                                Style="{StaticResource AccentButtonStyle}">
+                            <TextBlock Text="复制全部" FontSize="13"/>
+                        </Button>
+                        <Button Grid.Column="1" x:Name="OcrSaveButton"
+                                Click="OcrSaveButton_Click"
+                                HorizontalAlignment="Stretch" Margin="4,0,0,0">
+                            <TextBlock Text="存成 txt" FontSize="13"/>
+                        </Button>
+                    </Grid>
+                </Border>
+            </Grid>
+        </Border>
+
+        <!--
+          ===== 底部胶囊工具条 =====
+
+          按钮会越来越多（后面还有滤镜、裁剪、标记、擦除、背景、幻灯片…），
+          一行迟早装不下，所以这里做了三层保险：
+            1. 整体宽度最多占满窗口（MaxWidth 在代码里按窗口宽度算），
+               超出窗口就不再硬撑 —— 之前就是因为没这条，最右边的按钮被切掉半截；
+            2. 装不下时左右各浮出一个小箭头，点一下翻一段（也支持滚轮横向滚）；
+            3. 箭头用 Opacity 隐藏而不用 Visibility，避免"藏起箭头 → 变宽 → 又装得下
+               → 显示箭头 → 又装不下"来回抖。
+        -->
+        <Border x:Name="BottomBar"
+                VerticalAlignment="Bottom"
+                HorizontalAlignment="Center"
+                Margin="0,0,0,22"
+                Background="#CC1F1F1F"
+                BorderBrush="#33FFFFFF"
+                BorderThickness="1"
+                CornerRadius="24"
+                Padding="10,4">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <Button x:Name="BarLeftButton" Grid.Column="0"
+                        Click="BarLeftButton_Click"
+                        Width="22" Height="36" Padding="0"
+                        Background="Transparent" BorderThickness="0"
+                        Opacity="0" IsEnabled="False"
+                        ToolTipService.ToolTip="前面还有按钮">
+                    <!-- E76B = 左尖括号 -->
+                    <FontIcon Glyph="&#xE76B;" FontSize="14"/>
+                </Button>
+
+                <ScrollViewer x:Name="BarScroll" Grid.Column="1"
+                              VerticalAlignment="Center"
+                              HorizontalScrollMode="Auto"
+                              HorizontalScrollBarVisibility="Hidden"
+                              VerticalScrollMode="Disabled"
+                              VerticalScrollBarVisibility="Disabled"
+                              ViewChanged="BarScroll_ViewChanged"
+                              SizeChanged="BarScroll_SizeChanged">
+                    <StackPanel x:Name="BarButtons"
+                                Orientation="Horizontal"
+                                Spacing="1"
+                                SizeChanged="BarButtons_SizeChanged">
+                        <Button x:Name="BackButton" Click="BackButton_Click"
+                                ToolTipService.ToolTip="回到缩略图墙（Esc）" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <FontIcon Glyph="&#xE72B;" FontSize="18"/>
+                        </Button>
+
+                        <Rectangle Width="1" Height="22" Fill="#33FFFFFF" Margin="3,0"/>
+
+                        <Button x:Name="PrevButton" Click="PrevButton_Click"
+                                ToolTipService.ToolTip="上一张（←）" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <FontIcon Glyph="&#xE892;" FontSize="18"/>
+                        </Button>
+
+                        <TextBlock x:Name="CounterText"
+                                   VerticalAlignment="Center"
+                                   MinWidth="70"
+                                   TextAlignment="Center"
+                                   FontSize="12"
+                                   Foreground="#EEFFFFFF"/>
+
+                        <Button x:Name="NextButton" Click="NextButton_Click"
+                                ToolTipService.ToolTip="下一张（→）" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <FontIcon Glyph="&#xE893;" FontSize="18"/>
+                        </Button>
+
+                        <Rectangle Width="1" Height="22" Fill="#33FFFFFF" Margin="3,0"/>
+
+                        <Button Click="ZoomOutButton_Click"
+                                ToolTipService.ToolTip="缩小（-）" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <FontIcon Glyph="&#xE71F;" FontSize="18"/>
+                        </Button>
+
+                        <TextBlock x:Name="ZoomText"
+                                   VerticalAlignment="Center"
+                                   MinWidth="48"
+                                   TextAlignment="Center"
+                                   FontSize="12"
+                                   Foreground="#CCFFFFFF"/>
+
+                        <Button Click="ZoomInButton_Click"
+                                ToolTipService.ToolTip="放大（+）" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <FontIcon Glyph="&#xE8A3;" FontSize="18"/>
+                        </Button>
+
+                        <Button Click="FitButton_Click"
+                                ToolTipService.ToolTip="适应窗口（0）" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <FontIcon Glyph="&#xE71E;" FontSize="18"/>
+                        </Button>
+
+                        <Rectangle Width="1" Height="22" Fill="#33FFFFFF" Margin="3,0"/>
+
+                        <Button x:Name="FullScreenButton" Click="FullScreenButton_Click"
+                                ToolTipService.ToolTip="全屏（F11）" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <FontIcon Glyph="&#xE740;" FontSize="18"/>
+                        </Button>
+
+                        <Button x:Name="InfoButton" Click="InfoButton_Click"
+                                ToolTipService.ToolTip="参数面板（I）" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <!-- WinUI3 的 Symbol 枚举里没有 Info，只能用图标字体（Segoe MDL2 的 info 字形） -->
+                            <FontIcon Glyph="&#xE946;" FontSize="18"/>
+                        </Button>
+
+                        <Button Click="OpenFileButton_Click"
+                                ToolTipService.ToolTip="打开（Ctrl+O）" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <FontIcon Glyph="&#xE8B7;" FontSize="18"/>
+                        </Button>
+
+                        <Rectangle Width="1" Height="22" Fill="#33FFFFFF" Margin="3,0"/>
+
+                        <Button x:Name="CropButton" Click="CropButton_Click"
+                                ToolTipService.ToolTip="裁剪（C）" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <!-- E123 = 裁剪框字形 -->
+                            <FontIcon Glyph="&#xE123;" FontSize="18"/>
+                        </Button>
+
+                        <!-- 和裁剪挨着放：两个都是"先拉个框、再对框里那块动手"，
+                             共用同一套选框，连着点最顺 -->
+                        <Button x:Name="EraseButton" Click="EraseButton_Click"
+                                ToolTipService.ToolTip="擦除（E）" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <!-- E894 = 清理字形 -->
+                            <FontIcon Glyph="&#xE894;" FontSize="18"/>
+                        </Button>
+
+                        <Button x:Name="MarkButton" Click="MarkButton_Click"
+                                ToolTipService.ToolTip="标记（M）" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <!-- E70F = 铅笔字形 -->
+                            <FontIcon Glyph="&#xE70F;" FontSize="18"/>
+                        </Button>
+
+                        <Button x:Name="BgButton" Click="BgButton_Click"
+                                ToolTipService.ToolTip="背景：虚化 / 抠除 / 替换（B）" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <!-- 图标字体里没有"背景/图层"这一类字形，自绘一个：
+                                 前后两块错开的方块。叠着的那块半透明，一眼能看出是两层 -->
+                            <Grid Width="18" Height="18">
+                                <Border Width="11" Height="11"
+                                        HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                                        BorderBrush="#FFFFFFFF" BorderThickness="1.2" CornerRadius="1.5"/>
+                                <Border Width="11" Height="11"
+                                        HorizontalAlignment="Left" VerticalAlignment="Top"
+                                        Background="#8CFFFFFF" CornerRadius="1.5"/>
+                            </Grid>
+                        </Button>
+
+                        <Button x:Name="LookButton" Click="LookButton_Click"
+                                ToolTipService.ToolTip="风格与调整（F）" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <!-- E91B = 色调/魔法棒一类的字形，这里当"风格"用 -->
+                            <FontIcon Glyph="&#xE91B;" FontSize="18"/>
+                        </Button>
+
+                        <!-- 分隔线：左边是"改这张图"，右边是"看 / 取用" -->
+                        <Rectangle Width="1" Height="22" Fill="#33FFFFFF" Margin="3,0"/>
+
+                        <Button x:Name="SlideButton" Click="SlideButton_Click"
+                                ToolTipService.ToolTip="幻灯片放映（F5）" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <!-- E786 = 幻灯片（画框里装着内容） -->
+                            <FontIcon Glyph="&#xE786;" FontSize="18"/>
+                        </Button>
+
+                        <Button x:Name="OcrButton" Click="OcrButton_Click"
+                                ToolTipService.ToolTip="提取图上的文字（T）" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <!-- 字形字体里没有"文字识别"这种语义的图标，
+                                 E8A5 = 一页纸，借它表示"把图上的字读成一页文字" -->
+                            <FontIcon Glyph="&#xE8A5;" FontSize="18"/>
+                        </Button>
+
+                        <Button Click="RotateButton_Click"
+                                ToolTipService.ToolTip="旋转 90°（R）" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <FontIcon Glyph="&#xE7AD;" FontSize="18"/>
+                        </Button>
+
+                        <Button x:Name="SaveAsButton" Click="SaveAsButton_Click"
+                                ToolTipService.ToolTip="另存为（Ctrl+S）" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <FontIcon Glyph="&#xE74E;" FontSize="18"/>
+                        </Button>
+
+                        <Button Click="CopyButton_Click"
+                                ToolTipService.ToolTip="复制图片（Ctrl+C）" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <FontIcon Glyph="&#xE8C8;" FontSize="18"/>
+                        </Button>
+
+                        <Button Click="ResizeButton_Click"
+                                ToolTipService.ToolTip="调整图像大小" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <FontIcon Glyph="&#xE9A6;" FontSize="18"/>
+                        </Button>
+
+                        <Button Click="PrintButton_Click"
+                                ToolTipService.ToolTip="打印（Ctrl+P）" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <FontIcon Glyph="&#xE749;" FontSize="18"/>
+                        </Button>
+                    </StackPanel>
+                </ScrollViewer>
+
+                <Button x:Name="BarRightButton" Grid.Column="2"
+                        Click="BarRightButton_Click"
+                        Width="22" Height="36" Padding="0"
+                        Background="Transparent" BorderThickness="0"
+                        Opacity="0" IsEnabled="False"
+                        ToolTipService.ToolTip="后面还有按钮">
+                    <!-- E76C = 右尖括号 -->
+                    <FontIcon Glyph="&#xE76C;" FontSize="14"/>
+                </Button>
+            </Grid>
+        </Border>
+
+        <!--
+          ===== 幻灯片放映 =====
+
+          这一层是**透明的** —— 图片照旧走上面那个 ScrollViewer 显示，
+          这里只负责两件事：吃掉鼠标事件、浮一条会自动隐藏的控制条。
+
+          为什么不像裁剪 / 标记那样自带一块画布：
+          放映不需要画任何东西。它要的只是"点击别落到图片上"
+          （不然单击就把图拖走了），外加"鼠标一动控制条就出来"。
+          好处是解码缓存、预读、缩放那一整套原封不动地复用。
+
+          放映期间标题栏和底部工具条都会被收起来（见 EnterSlideMode），
+          所以这一层同时也是退出放映的唯一入口：双击或 Esc。
+        -->
+        <Grid x:Name="SlideLayer"
+              Visibility="Collapsed"
+              Background="Transparent"
+              PointerMoved="Slide_PointerMoved"
+              PointerPressed="Slide_PointerPressed"
+              PointerWheelChanged="Slide_PointerWheelChanged"
+              DoubleTapped="Slide_DoubleTapped">
+
+            <!--
+              控制条：和底部工具条同一个长相（胶囊、半透明深色、描边），
+              让"放映"看起来只是把原来那条换成了这条。
+
+              隐藏用 Opacity 不用 Visibility —— 和底条两端的小箭头同一个道理：
+              来回切 Visibility 会让布局反复重算，淡出淡入走合成层，一点不费。
+            -->
+            <Border x:Name="SlideBar"
+                    VerticalAlignment="Bottom"
+                    HorizontalAlignment="Center"
+                    Margin="0,0,0,40"
+                    Background="#F21F1F1F"
+                    BorderBrush="#33FFFFFF"
+                    BorderThickness="1"
+                    CornerRadius="24"
+                    Padding="10,5">
+                <StackPanel Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+
+                    <Button Click="SlidePrev_Click" Width="40" Height="36" Padding="0"
+                            Background="Transparent" BorderThickness="0"
+                            ToolTipService.ToolTip="上一张（←）">
+                        <FontIcon Glyph="&#xE892;" FontSize="16"/>
+                    </Button>
+
+                    <Button x:Name="SlidePlayButton" Click="SlidePlay_Click"
+                            Width="46" Height="36" Padding="0"
+                            Background="Transparent" BorderThickness="0"
+                            ToolTipService.ToolTip="播放 / 暂停（空格）">
+                        <!-- 初始是"暂停"字形：一进来就在自动播，按钮该显示"点我暂停" -->
+                        <FontIcon x:Name="SlidePlayIcon" Glyph="&#xE769;" FontSize="16"/>
+                    </Button>
+
+                    <Button Click="SlideNext_Click" Width="40" Height="36" Padding="0"
+                            Background="Transparent" BorderThickness="0"
+                            ToolTipService.ToolTip="下一张（→）">
+                        <FontIcon Glyph="&#xE893;" FontSize="16"/>
+                    </Button>
+
+                    <Rectangle Width="1" Height="20" Fill="#33FFFFFF" Margin="5,0"/>
+
+                    <TextBlock Text="间隔" FontSize="12" Foreground="#99FFFFFF"
+                               VerticalAlignment="Center" Margin="2,0,4,0"/>
+
+                    <!-- 三档固定间隔，不做滑块：放映时是"离手"的场景，
+                         没人会盯着一个滑块去拖精确到 0.1 秒 -->
+                    <Button x:Name="SlideInterval3" Tag="3" Click="SlideInterval_Click" Content="3 秒"
+                            Width="52" Height="30" Padding="0" FontSize="12" Foreground="#EEFFFFFF"
+                            Background="Transparent" BorderThickness="1" BorderBrush="Transparent"/>
+
+                    <Button x:Name="SlideInterval5" Tag="5" Click="SlideInterval_Click" Content="5 秒"
+                            Width="52" Height="30" Padding="0" FontSize="12" Foreground="#EEFFFFFF"
+                            Background="Transparent" BorderThickness="1" BorderBrush="Transparent"/>
+
+                    <Button x:Name="SlideInterval10" Tag="10" Click="SlideInterval_Click" Content="10 秒"
+                            Width="56" Height="30" Padding="0" FontSize="12" Foreground="#EEFFFFFF"
+                            Background="Transparent" BorderThickness="1" BorderBrush="Transparent"/>
+
+                    <Rectangle Width="1" Height="20" Fill="#33FFFFFF" Margin="5,0"/>
+
+                    <TextBlock x:Name="SlideCounterText"
+                               MinWidth="70"
+                               TextAlignment="Center"
+                               VerticalAlignment="Center"
+                               FontSize="12"
+                               Foreground="#EEFFFFFF"/>
+
+                    <Button Click="SlideExit_Click" Width="36" Height="36" Padding="0"
+                            Background="Transparent" BorderThickness="0"
+                            ToolTipService.ToolTip="退出放映（Esc）">
+                        <FontIcon Glyph="&#xE711;" FontSize="13"/>
+                    </Button>
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <!--
+          ===== 裁剪模式 =====
+
+          放在底条**之后** = z 序最高，进来就把整个界面盖住（包括底条和标题栏的拖动区），
+          这样裁剪期间不存在"点到别的东西"的可能，是个干净的模式。
+
+          视觉元件全塞在一个 IsHitTestVisible="False" 的 Canvas 里，
+          命中判定由这一层自己的指针事件算：8 个把手 → 调大小，框内 → 挪框，
+          框外 → 重新画一个。比给每个把手单独挂事件简单，也不会出现
+          "把手太小点不准"—— 判定半径给到 14px，比看得见的 12px 大方一点。
+
+          坐标用的是这一层自己的坐标系，它和 ScrollViewer 一样铺满整个页面，
+          所以两者坐标可以直接互算（图片的位置靠 TransformToVisual 换算）。
+        -->
+        <ctrl:CursorLayer x:Name="CropLayer"
+                          Visibility="Collapsed"
+                          Background="Transparent"
+                          PointerPressed="Crop_PointerPressed"
+                          PointerMoved="Crop_PointerMoved"
+                          PointerReleased="Crop_PointerReleased"
+                          PointerCaptureLost="Crop_PointerReleased">
+
+            <Canvas x:Name="CropCanvas" IsHitTestVisible="False">
+                <!-- 框外压暗：四块矩形围出中间那块亮的 -->
+                <Rectangle x:Name="CropDimTop" Fill="#A6000000"/>
+                <Rectangle x:Name="CropDimBottom" Fill="#A6000000"/>
+                <Rectangle x:Name="CropDimLeft" Fill="#A6000000"/>
+                <Rectangle x:Name="CropDimRight" Fill="#A6000000"/>
+
+                <!-- 三分线：构图参考，很淡，淡到不影响看效果 -->
+                <Line x:Name="CropGridV1" Stroke="#4DFFFFFF" StrokeThickness="1"/>
+                <Line x:Name="CropGridV2" Stroke="#4DFFFFFF" StrokeThickness="1"/>
+                <Line x:Name="CropGridH1" Stroke="#4DFFFFFF" StrokeThickness="1"/>
+                <Line x:Name="CropGridH2" Stroke="#4DFFFFFF" StrokeThickness="1"/>
+
+                <Rectangle x:Name="CropBox" Stroke="#FFFFFFFF" StrokeThickness="1"/>
+
+                <!--
+                  8 个把手。下标含义（八方位）：
+                    0=左上 1=上 2=右上 3=右 4=右下 5=下 6=左下 7=左
+                  锁了比例之后只剩 0/2/4/6 四个角可见 —— 边把手在锁比例时
+                  没法只动一边，留着会让人以为能拉，干脆收起来。
+                -->
+                <Rectangle x:Name="CropHandle0" Fill="#FFFFFFFF" Stroke="#66000000" StrokeThickness="1"/>
+                <Rectangle x:Name="CropHandle1" Fill="#FFFFFFFF" Stroke="#66000000" StrokeThickness="1"/>
+                <Rectangle x:Name="CropHandle2" Fill="#FFFFFFFF" Stroke="#66000000" StrokeThickness="1"/>
+                <Rectangle x:Name="CropHandle3" Fill="#FFFFFFFF" Stroke="#66000000" StrokeThickness="1"/>
+                <Rectangle x:Name="CropHandle4" Fill="#FFFFFFFF" Stroke="#66000000" StrokeThickness="1"/>
+                <Rectangle x:Name="CropHandle5" Fill="#FFFFFFFF" Stroke="#66000000" StrokeThickness="1"/>
+                <Rectangle x:Name="CropHandle6" Fill="#FFFFFFFF" Stroke="#66000000" StrokeThickness="1"/>
+                <Rectangle x:Name="CropHandle7" Fill="#FFFFFFFF" Stroke="#66000000" StrokeThickness="1"/>
+            </Canvas>
+
+            <!-- 工具条。放在最底部，和平时那条工具条同一个高度，视觉上是"换了条工具条" -->
+            <Border x:Name="CropToolbar"
+                    VerticalAlignment="Bottom"
+                    HorizontalAlignment="Center"
+                    Margin="0,0,0,22"
+                    Background="#CC1F1F1F"
+                    BorderBrush="#33FFFFFF"
+                    BorderThickness="1"
+                    CornerRadius="22"
+                    Padding="8,4">
+                <StackPanel Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+
+                    <TextBlock x:Name="CropSizeText"
+                               VerticalAlignment="Center"
+                               MinWidth="112"
+                               TextAlignment="Center"
+                               FontSize="12"
+                               Foreground="#EEFFFFFF"
+                               ToolTipService.ToolTip="裁剪后的像素尺寸"/>
+
+                    <!-- 裁剪这一档：锁定比例 -->
+                    <StackPanel x:Name="CropRatioRow"
+                                Orientation="Horizontal" Spacing="2"
+                                VerticalAlignment="Center">
+
+                    <Rectangle Width="1" Height="22" Fill="#33FFFFFF" Margin="5,0"/>
+
+                    <Button x:Name="CropRatioFree" Tag="0" Click="CropRatio_Click" Content="自由"
+                            Width="46" Height="32" Padding="0" FontSize="12"
+                            Foreground="#EEFFFFFF"
+                            Background="Transparent" BorderThickness="1" BorderBrush="Transparent"
+                            ToolTipService.ToolTip="不锁比例"/>
+
+                    <Button x:Name="CropRatio1x1" Tag="1:1" Click="CropRatio_Click" Content="1:1"
+                            Width="46" Height="32" Padding="0" FontSize="12"
+                            Foreground="#EEFFFFFF"
+                            Background="Transparent" BorderThickness="1" BorderBrush="Transparent"
+                            ToolTipService.ToolTip="正方形"/>
+
+                    <Button x:Name="CropRatio4x3" Tag="4:3" Click="CropRatio_Click" Content="4:3"
+                            Width="46" Height="32" Padding="0" FontSize="12"
+                            Foreground="#EEFFFFFF"
+                            Background="Transparent" BorderThickness="1" BorderBrush="Transparent"
+                            ToolTipService.ToolTip="横向 4:3"/>
+
+                    <Button x:Name="CropRatio3x4" Tag="3:4" Click="CropRatio_Click" Content="3:4"
+                            Width="46" Height="32" Padding="0" FontSize="12"
+                            Foreground="#EEFFFFFF"
+                            Background="Transparent" BorderThickness="1" BorderBrush="Transparent"
+                            ToolTipService.ToolTip="竖向 3:4"/>
+
+                    <Button x:Name="CropRatio16x9" Tag="16:9" Click="CropRatio_Click" Content="16:9"
+                            Width="46" Height="32" Padding="0" FontSize="12"
+                            Foreground="#EEFFFFFF"
+                            Background="Transparent" BorderThickness="1" BorderBrush="Transparent"
+                            ToolTipService.ToolTip="宽屏 16:9"/>
+
+                    <Button x:Name="CropRatio9x16" Tag="9:16" Click="CropRatio_Click" Content="9:16"
+                            Width="46" Height="32" Padding="0" FontSize="12"
+                            Foreground="#EEFFFFFF"
+                            Background="Transparent" BorderThickness="1" BorderBrush="Transparent"
+                            ToolTipService.ToolTip="竖屏 9:16"/>
+
+                    <Rectangle Width="1" Height="22" Fill="#33FFFFFF" Margin="5,0"/>
+                    </StackPanel>
+
+                    <!-- 擦除这一档：框里那块擦掉之后填什么。
+                         这三个是"要什么效果"的语义选择，不是工具，所以用文字比图标清楚 -->
+                    <StackPanel x:Name="EraseModeRow"
+                                Visibility="Collapsed"
+                                Orientation="Horizontal" Spacing="2"
+                                VerticalAlignment="Center">
+
+                    <Rectangle Width="1" Height="22" Fill="#33FFFFFF" Margin="5,0"/>
+
+                    <Button x:Name="EraseModeInpaint" Tag="0" Click="EraseMode_Click" Content="智能填充"
+                            Width="72" Height="32" Padding="0" FontSize="12"
+                            Foreground="#EEFFFFFF"
+                            Background="Transparent" BorderThickness="1" BorderBrush="Transparent"
+                            ToolTipService.ToolTip="拿框外面的像素一层层往里补，把框里那样东西抹掉（1）"/>
+
+                    <Button x:Name="EraseModeWhite" Tag="1" Click="EraseMode_Click" Content="填白"
+                            Width="52" Height="32" Padding="0" FontSize="12"
+                            Foreground="#EEFFFFFF"
+                            Background="Transparent" BorderThickness="1" BorderBrush="Transparent"
+                            ToolTipService.ToolTip="直接盖成白色（2）"/>
+
+                    <Button x:Name="EraseModeTransparent" Tag="2" Click="EraseMode_Click" Content="填透明"
+                            Width="64" Height="32" Padding="0" FontSize="12"
+                            Foreground="#EEFFFFFF"
+                            Background="Transparent" BorderThickness="1" BorderBrush="Transparent"
+                            ToolTipService.ToolTip="把这块抠成透明，存成 PNG 才有效果（3）"/>
+
+                    <Rectangle Width="1" Height="22" Fill="#33FFFFFF" Margin="5,0"/>
+                    </StackPanel>
+
+                    <Button x:Name="CropCancelButton" Click="CropCancel_Click" Content="取消"
+                            Width="60" Height="32" Padding="0" FontSize="12"
+                            Background="Transparent" BorderThickness="0"
+                            ToolTipService.ToolTip="放弃这次裁剪（Esc）"/>
+
+                    <Button x:Name="CropApplyButton" Click="CropApply_Click" Content="应用"
+                            Width="60" Height="32" Padding="0" FontSize="12"
+                            Background="#FF2D6CDF" BorderThickness="0"
+                            ToolTipService.ToolTip="裁成选框里的部分（回车）">
+                        <Button.Resources>
+                            <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#FF3B7BEA"/>
+                            <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#FF245BBF"/>
+                        </Button.Resources>
+                    </Button>
+                </StackPanel>
+            </Border>
+        </ctrl:CursorLayer>
+
+        <!--
+          标记层。和裁剪层一样是整页大小、压在图片上面的一层，
+          但这里不是画选框，而是**直接往图片像素上写**（见 PhotoMark 的说明）。
+          放在裁剪层后面，是因为同一时刻只会有一个可见。
+        -->
+        <ctrl:CursorLayer x:Name="MarkLayer"
+                          Visibility="Collapsed"
+                          Background="Transparent"
+                          SizeChanged="MarkLayer_SizeChanged"
+                          PointerPressed="Mark_PointerPressed"
+                          PointerMoved="Mark_PointerMoved"
+                          PointerReleased="Mark_PointerReleased"
+                          PointerExited="Mark_PointerExited"
+                          PointerCaptureLost="Mark_PointerReleased">
+            <Grid>
+                <!-- 顶部一句提示。写起来没门槛，但"怎么翻页""怎么平移"用户猜不到 -->
+                <Border VerticalAlignment="Top" HorizontalAlignment="Center"
+                        Margin="0,16,0,0"
+                        Background="#B31F1F1F" BorderBrush="#33FFFFFF" BorderThickness="1"
+                        CornerRadius="14" Padding="14,6">
+                    <TextBlock FontSize="12" Foreground="#CCFFFFFF"
+                               Text="按住左键在图上写画；中键拖动可平移画面；滚轮缩放"/>
+                </Border>
+
+                <Border x:Name="MarkToolbar"
+                        VerticalAlignment="Bottom" HorizontalAlignment="Center"
+                        Margin="0,0,0,22"
+                        Background="#CC1F1F1F"
+                        BorderBrush="#33FFFFFF"
+                        BorderThickness="1"
+                        CornerRadius="18"
+                        Padding="10,8">
+                    <!-- 工具条比较长，窗口窄的时候能横向滚，不至于把"应用"挤没了 -->
+                    <ScrollViewer HorizontalScrollMode="Auto"
+                                  HorizontalScrollBarVisibility="Auto"
+                                  VerticalScrollMode="Disabled"
+                                  VerticalScrollBarVisibility="Disabled"
+                                  ZoomMode="Disabled">
+                        <StackPanel Spacing="7">
+
+                            <!-- 第一行：四支笔、撤销重做、取消应用 -->
+                            <StackPanel Orientation="Horizontal" Spacing="3" HorizontalAlignment="Center">
+                                <!-- 四支笔只用图标（字形含义见各自注释），文字全塞进悬浮提示里，
+                                     免得两行工具条在窄窗口下挤成一团 -->
+                                <Button x:Name="MarkToolPen" Tag="0" Click="MarkTool_Click"
+                                        Width="42" Height="32" Padding="0"
+                                        Foreground="#EEFFFFFF"
+                                        Background="Transparent" BorderThickness="1" BorderBrush="Transparent"
+                                        ToolTipService.ToolTip="圆头笔：边缘柔和的实心笔（1）">
+                                    <!-- E70F = 铅笔 -->
+                                    <FontIcon Glyph="&#xE70F;" FontSize="16"/>
+                                </Button>
+
+                                <Button x:Name="MarkToolHighlighter" Tag="1" Click="MarkTool_Click"
+                                        Width="42" Height="32" Padding="0"
+                                        Foreground="#EEFFFFFF"
+                                        Background="Transparent" BorderThickness="1" BorderBrush="Transparent"
+                                        ToolTipService.ToolTip="荧光笔：半透明粗笔，压在字上字还看得见（2）">
+                                    <!-- E7E6 = 高亮/荧光 -->
+                                    <FontIcon Glyph="&#xE7E6;" FontSize="16"/>
+                                </Button>
+
+                                <Button x:Name="MarkToolNib" Tag="2" Click="MarkTool_Click"
+                                        Width="42" Height="32" Padding="0"
+                                        Foreground="#EEFFFFFF"
+                                        Background="Transparent" BorderThickness="1" BorderBrush="Transparent"
+                                        ToolTipService.ToolTip="手写笔：硬笔尖，划得越快线越细（3）">
+                                    <!-- E76D = 书写工具 -->
+                                    <FontIcon Glyph="&#xE76D;" FontSize="16"/>
+                                </Button>
+
+                                <Button x:Name="MarkToolEraser" Tag="3" Click="MarkTool_Click"
+                                        Width="42" Height="32" Padding="0"
+                                        Foreground="#EEFFFFFF"
+                                        Background="Transparent" BorderThickness="1" BorderBrush="Transparent"
+                                        ToolTipService.ToolTip="橡皮：只擦标记，照片本身不受影响（4）">
+                                    <!-- E75C = 擦除工具 -->
+                                    <FontIcon Glyph="&#xE75C;" FontSize="16"/>
+                                </Button>
+
+                                <Rectangle Width="1" Height="22" Fill="#33FFFFFF" Margin="5,0"/>
+
+                                <Button x:Name="MarkUndoButton" Click="MarkUndo_Click" Content="撤销"
+                                        Width="50" Height="32" Padding="0" FontSize="12"
+                                        Foreground="#EEFFFFFF"
+                                        Background="Transparent" BorderThickness="0"
+                                        ToolTipService.ToolTip="退掉最后一笔（Ctrl+Z）"/>
+
+                                <Button x:Name="MarkRedoButton" Click="MarkRedo_Click" Content="重做"
+                                        Width="50" Height="32" Padding="0" FontSize="12"
+                                        Foreground="#EEFFFFFF"
+                                        Background="Transparent" BorderThickness="0"
+                                        ToolTipService.ToolTip="把撤销掉的那笔找回来（Ctrl+Y）"/>
+
+                                <Rectangle Width="1" Height="22" Fill="#33FFFFFF" Margin="5,0"/>
+
+                                <Button x:Name="MarkCancelButton" Click="MarkCancel_Click" Content="取消"
+                                        Width="56" Height="32" Padding="0" FontSize="12"
+                                        Background="Transparent" BorderThickness="0"
+                                        ToolTipService.ToolTip="全部不要了（Esc）"/>
+
+                                <Button x:Name="MarkApplyButton" Click="MarkApply_Click" Content="应用"
+                                        Width="56" Height="32" Padding="0" FontSize="12"
+                                        Background="#FF2D6CDF" BorderThickness="0"
+                                        ToolTipService.ToolTip="把标记留在图上（回车）">
+                                    <Button.Resources>
+                                        <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#FF3B7BEA"/>
+                                        <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#FF245BBF"/>
+                                    </Button.Resources>
+                                </Button>
+                            </StackPanel>
+
+                            <!-- 第二行：颜色、粗细 -->
+                            <StackPanel Orientation="Horizontal" Spacing="4" HorizontalAlignment="Center">
+                                <!-- 颜色圆点是代码里按 PhotoMark.Palette 生成的 -->
+                                <StackPanel x:Name="MarkColorHost"
+                                            Orientation="Horizontal" Spacing="5"
+                                            VerticalAlignment="Center"/>
+
+                                <Rectangle Width="1" Height="22" Fill="#33FFFFFF" Margin="7,0"/>
+
+                                <TextBlock Text="粗细" FontSize="12" Foreground="#CCFFFFFF"
+                                           VerticalAlignment="Center"/>
+
+                                <Slider x:Name="MarkWidthSlider"
+                                        Width="130" MinWidth="90"
+                                        Minimum="2" Maximum="120" Value="6"
+                                        StepFrequency="1"
+                                        VerticalAlignment="Center"
+                                        ValueChanged="MarkWidth_ValueChanged"/>
+
+                                <TextBlock x:Name="MarkWidthText"
+                                           FontSize="12" MinWidth="30" TextAlignment="Right"
+                                           Foreground="#CCFFFFFF" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </ScrollViewer>
+                </Border>
+
+                <!--
+                  笔尖指示：跟着鼠标走的**空心圆**，直径就是实际笔宽。
+                  系统指针在标记模式下被隐藏了，所以它是屏幕上唯一的"鼠标在哪 + 笔多粗"提示。
+                  画两个圆叠着：底下一圈半透明的黑做描边阴影（浅色照片上白圈会看不见），
+                  上面才是白圈。橡皮用虚线，一眼能区分"在画"还是在擦。
+                -->
+                <Ellipse x:Name="MarkRingShadow"
+                         Visibility="Collapsed"
+                         IsHitTestVisible="False"
+                         HorizontalAlignment="Left" VerticalAlignment="Top"
+                         Stroke="#8C000000" StrokeThickness="3"/>
+                <Ellipse x:Name="MarkRing"
+                         Visibility="Collapsed"
+                         IsHitTestVisible="False"
+                         HorizontalAlignment="Left" VerticalAlignment="Top"
+                         Stroke="#FFFFFFFF" StrokeThickness="1.25"/>
+            </Grid>
+        </ctrl:CursorLayer>
+
+        <!--
+          背景层。和标记层同一套路子：整页大小、压在图片上面、直接改像素。
+          差别在于动的不是"画上去的笔迹"，而是**遮罩里那块区域的效果** ——
+          虚化、抠除（变透明）、替换（纯色或另一张图），三选一，共用同一张遮罩。
+
+          遮罩怎么来：魔棒点一下选连通同色区（纯色天空/影棚背景一点一大片），
+          画笔/橡皮手动补边角。三个动作都是实时预览，点"应用"才真的落到图上。
+        -->
+        <ctrl:CursorLayer x:Name="BackgroundLayer"
+                          Visibility="Collapsed"
+                          Background="Transparent"
+                          SizeChanged="BgLayer_SizeChanged"
+                          PointerPressed="Bg_PointerPressed"
+                          PointerMoved="Bg_PointerMoved"
+                          PointerReleased="Bg_PointerReleased"
+                          PointerExited="Bg_PointerExited"
+                          PointerCaptureLost="Bg_PointerReleased">
+            <Grid>
+                <!-- 顶上这句是必读的：光看工具条猜不出"先用魔棒点背景"这一步 -->
+                <Border VerticalAlignment="Top" HorizontalAlignment="Center"
+                        Margin="0,16,0,0"
+                        Background="#B31F1F1F" BorderBrush="#33FFFFFF" BorderThickness="1"
+                        CornerRadius="14" Padding="14,6">
+                    <TextBlock x:Name="BgHintText" FontSize="12" Foreground="#CCFFFFFF"
+                               Text="先用魔棒点一下背景（或用画笔涂出要处理的地方），再选虚化 / 抠除 / 替换；中键拖动平移，滚轮缩放"/>
+                </Border>
+
+                <Border x:Name="BackgroundToolbar"
+                        VerticalAlignment="Bottom" HorizontalAlignment="Center"
+                        Margin="0,0,0,22"
+                        Background="#CC1F1F1F"
+                        BorderBrush="#33FFFFFF"
+                        BorderThickness="1"
+                        CornerRadius="18"
+                        Padding="10,8">
+                    <!-- 这一条比标记那条还长，窄窗口下必须能横向滚，不然"应用"会被挤没 -->
+                    <ScrollViewer HorizontalScrollMode="Auto"
+                                  HorizontalScrollBarVisibility="Auto"
+                                  VerticalScrollMode="Disabled"
+                                  VerticalScrollBarVisibility="Disabled"
+                                  ZoomMode="Disabled">
+                        <StackPanel Spacing="7">
+
+                            <!-- 第一行：做什么（三选一）、用什么工具、清空 / 取消 / 应用 -->
+                            <StackPanel Orientation="Horizontal" Spacing="3" HorizontalAlignment="Center">
+
+                                <!-- 三个动作是"要什么效果"的语义选择，不是工具，用文字比图标清楚 -->
+                                <Button x:Name="BgActionBlur" Tag="0" Click="BgAction_Click" Content="虚化"
+                                        Width="52" Height="32" Padding="0" FontSize="12"
+                                        Foreground="#EEFFFFFF"
+                                        Background="Transparent" BorderThickness="1" BorderBrush="Transparent"
+                                        ToolTipService.ToolTip="把选中那块糊掉，主体保持清楚（1）"/>
+
+                                <Button x:Name="BgActionRemove" Tag="1" Click="BgAction_Click" Content="抠除"
+                                        Width="52" Height="32" Padding="0" FontSize="12"
+                                        Foreground="#EEFFFFFF"
+                                        Background="Transparent" BorderThickness="1" BorderBrush="Transparent"
+                                        ToolTipService.ToolTip="把选中那块变成透明，背景就没了（存 PNG 才有效果）（2）"/>
+
+                                <Button x:Name="BgActionReplace" Tag="2" Click="BgAction_Click" Content="替换"
+                                        Width="52" Height="32" Padding="0" FontSize="12"
+                                        Foreground="#EEFFFFFF"
+                                        Background="Transparent" BorderThickness="1" BorderBrush="Transparent"
+                                        ToolTipService.ToolTip="把选中那块换成纯色或另一张图（3）"/>
+
+                                <Rectangle Width="1" Height="22" Fill="#33FFFFFF" Margin="5,0"/>
+
+                                <Button x:Name="BgToolBrush" Tag="0" Click="BgTool_Click"
+                                        Width="42" Height="32" Padding="0"
+                                        Foreground="#EEFFFFFF"
+                                        Background="Transparent" BorderThickness="1" BorderBrush="Transparent"
+                                        ToolTipService.ToolTip="画笔：往遮罩里涂（按住左键涂，B）">
+                                    <!-- E70F = 铅笔 -->
+                                    <FontIcon Glyph="&#xE70F;" FontSize="16"/>
+                                </Button>
+
+                                <Button x:Name="BgToolEraser" Tag="1" Click="BgTool_Click"
+                                        Width="42" Height="32" Padding="0"
+                                        Foreground="#EEFFFFFF"
+                                        Background="Transparent" BorderThickness="1" BorderBrush="Transparent"
+                                        ToolTipService.ToolTip="橡皮：把涂多的遮罩擦掉（E）">
+                                    <!-- E75C = 擦除工具 -->
+                                    <FontIcon Glyph="&#xE75C;" FontSize="16"/>
+                                </Button>
+
+                                <Button x:Name="BgToolWand" Tag="2" Click="BgTool_Click"
+                                        Width="42" Height="32" Padding="0"
+                                        Foreground="#EEFFFFFF"
+                                        Background="Transparent" BorderThickness="1" BorderBrush="Transparent"
+                                        ToolTipService.ToolTip="魔棒：点一下，颜色相近又连成一片的地方全选中（W）">
+                                    <!-- 图标字体里没有魔棒，自绘：一根斜棒 + 一颗四角星 -->
+                                    <Grid Width="18" Height="18">
+                                        <Path Stroke="#FFFFFFFF" StrokeThickness="1.8"
+                                              StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                              Stretch="None"
+                                              HorizontalAlignment="Left" VerticalAlignment="Top"
+                                              Data="M2.5,15.5 L9.5,8.5"/>
+                                        <Path Fill="#FFFFFFFF" Stretch="None"
+                                              HorizontalAlignment="Left" VerticalAlignment="Top"
+                                              Data="M13.2,2 L13.9,4.4 L16.3,5.1 L13.9,5.8 L13.2,8.2 L12.5,5.8 L10.1,5.1 L12.5,4.4 Z"/>
+                                    </Grid>
+                                </Button>
+
+                                <Rectangle Width="1" Height="22" Fill="#33FFFFFF" Margin="5,0"/>
+
+                                <Button x:Name="BgUndoButton" Click="BgUndo_Click" Content="撤销"
+                                        Width="50" Height="32" Padding="0" FontSize="12"
+                                        Foreground="#EEFFFFFF"
+                                        Background="Transparent" BorderThickness="0"
+                                        ToolTipService.ToolTip="退掉上一次选的区域（Ctrl+Z）"/>
+
+                                <Button x:Name="BgClearButton" Click="BgClear_Click" Content="清空"
+                                        Width="50" Height="32" Padding="0" FontSize="12"
+                                        Foreground="#EEFFFFFF"
+                                        Background="Transparent" BorderThickness="0"
+                                        ToolTipService.ToolTip="把选中的区域全部取消，重新开始选"/>
+
+                                <Rectangle Width="1" Height="22" Fill="#33FFFFFF" Margin="5,0"/>
+
+                                <Button x:Name="BgCancelButton" Click="BgCancel_Click" Content="取消"
+                                        Width="56" Height="32" Padding="0" FontSize="12"
+                                        Background="Transparent" BorderThickness="0"
+                                        ToolTipService.ToolTip="全部不要了，回到原来的图（Esc）"/>
+
+                                <Button x:Name="BgApplyButton" Click="BgApply_Click" Content="应用"
+                                        Width="56" Height="32" Padding="0" FontSize="12"
+                                        Background="#FF2D6CDF" BorderThickness="0"
+                                        ToolTipService.ToolTip="把效果落到图上（回车）">
+                                    <Button.Resources>
+                                        <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#FF3B7BEA"/>
+                                        <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#FF245BBF"/>
+                                    </Button.Resources>
+                                </Button>
+                            </StackPanel>
+
+                            <!-- 第二行：三个滑块。笔宽管画笔/橡皮，模糊管虚化强度，羽化管理边缘的软硬 -->
+                            <StackPanel Orientation="Horizontal" Spacing="4" HorizontalAlignment="Center">
+                                <TextBlock Text="笔宽" FontSize="12" Foreground="#CCFFFFFF"
+                                           VerticalAlignment="Center"/>
+
+                                <Slider x:Name="BgWidthSlider"
+                                        Width="110" MinWidth="80"
+                                        Minimum="4" Maximum="400" Value="60"
+                                        StepFrequency="1"
+                                        VerticalAlignment="Center"
+                                        ValueChanged="BgWidth_ValueChanged"/>
+
+                                <TextBlock x:Name="BgWidthText"
+                                           FontSize="12" MinWidth="32" TextAlignment="Right"
+                                           Foreground="#CCFFFFFF" VerticalAlignment="Center"/>
+
+                                <Rectangle Width="1" Height="22" Fill="#33FFFFFF" Margin="7,0"/>
+
+                                <TextBlock Text="虚化" FontSize="12" Foreground="#CCFFFFFF"
+                                           VerticalAlignment="Center"/>
+
+                                <Slider x:Name="BgStrengthSlider"
+                                        Width="110" MinWidth="80"
+                                        Minimum="0" Maximum="100" Value="55"
+                                        StepFrequency="1"
+                                        VerticalAlignment="Center"
+                                        ValueChanged="BgStrength_ValueChanged"/>
+
+                                <TextBlock x:Name="BgStrengthText"
+                                           FontSize="12" MinWidth="32" TextAlignment="Right"
+                                           Foreground="#CCFFFFFF" VerticalAlignment="Center"/>
+
+                                <Rectangle Width="1" Height="22" Fill="#33FFFFFF" Margin="7,0"/>
+
+                                <TextBlock Text="羽化" FontSize="12" Foreground="#CCFFFFFF"
+                                           VerticalAlignment="Center"/>
+
+                                <Slider x:Name="BgFeatherSlider"
+                                        Width="110" MinWidth="80"
+                                        Minimum="0" Maximum="100" Value="25"
+                                        StepFrequency="1"
+                                        VerticalAlignment="Center"
+                                        ValueChanged="BgFeather_ValueChanged"/>
+
+                                <TextBlock x:Name="BgFeatherText"
+                                           FontSize="12" MinWidth="32" TextAlignment="Right"
+                                           Foreground="#CCFFFFFF" VerticalAlignment="Center"/>
+                            </StackPanel>
+
+                            <!-- 第三行只在"替换"时露面：换成什么颜色，或者换成哪张图 -->
+                            <StackPanel x:Name="BgReplaceRow"
+                                        Visibility="Collapsed"
+                                        Orientation="Horizontal" Spacing="4" HorizontalAlignment="Center">
+                                <TextBlock Text="背景色" FontSize="12" Foreground="#CCFFFFFF"
+                                           VerticalAlignment="Center"/>
+
+                                <!-- 色块由代码按 BgPalette 生成 -->
+                                <StackPanel x:Name="BgColorHost"
+                                            Orientation="Horizontal" Spacing="5"
+                                            VerticalAlignment="Center"/>
+
+                                <Button x:Name="BgPickColorButton" Click="BgPickColor_Click" Content="调色板"
+                                        Width="60" Height="30" Padding="0" FontSize="12"
+                                        Foreground="#EEFFFFFF"
+                                        Background="Transparent" BorderThickness="1" BorderBrush="#33FFFFFF"
+                                        ToolTipService.ToolTip="挑一个不在预设里的颜色"/>
+
+                                <Rectangle Width="1" Height="22" Fill="#33FFFFFF" Margin="7,0"/>
+
+                                <Button x:Name="BgPickImageButton" Click="BgPickImage_Click" Content="选图片…"
+                                        Width="76" Height="30" Padding="0" FontSize="12"
+                                        Foreground="#EEFFFFFF"
+                                        Background="Transparent" BorderThickness="1" BorderBrush="#33FFFFFF"
+                                        ToolTipService.ToolTip="拿另一张图当背景，按铺满缩放、居中裁"/>
+
+                                <Button x:Name="BgClearImageButton" Click="BgClearImage_Click" Content="不用图片"
+                                        Width="76" Height="30" Padding="0" FontSize="12"
+                                        Visibility="Collapsed"
+                                        Foreground="#EEFFFFFF"
+                                        Background="Transparent" BorderThickness="1" BorderBrush="#33FFFFFF"
+                                        ToolTipService.ToolTip="改回用纯色"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </ScrollViewer>
+                </Border>
+
+                <!-- 笔尖指示：和标记模式一样是自绘空心圆（系统指针这时被藏起来了）。
+                     画笔用实线、橡皮用虚线，一眼能分出"在涂"还是在"在擦" -->
+                <Ellipse x:Name="BgRingShadow"
+                         Visibility="Collapsed"
+                         IsHitTestVisible="False"
+                         HorizontalAlignment="Left" VerticalAlignment="Top"
+                         Stroke="#8C000000" StrokeThickness="3"/>
+                <Ellipse x:Name="BgRing"
+                         Visibility="Collapsed"
+                         IsHitTestVisible="False"
+                         HorizontalAlignment="Left" VerticalAlignment="Top"
+                         Stroke="#FFFFFFFF" StrokeThickness="1.25"/>
+            </Grid>
+        </ctrl:CursorLayer>
+    </Grid>
+</Page>
