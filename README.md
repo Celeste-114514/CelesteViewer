@@ -18,10 +18,10 @@
 
 程序是**框架依赖**发布，运行前需要：
 
-- .NET 9 桌面运行时 —— https://dotnet.microsoft.com/zh-cn/download/dotnet/9.0/runtime
+- .NET 9 运行时 —— https://dotnet.microsoft.com/zh-cn/download/dotnet/9.0/runtime
 - Windows App SDK 2.x 运行时 —— https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads
 
-安装程序会在开始前检测这两项，缺了会提示下载。
+安装程序会在开始前检测这两项，缺哪个就提示去下哪个。
 
 ## 构建
 
@@ -32,9 +32,13 @@ dotnet build CelesteViewer.csproj -c Debug -p:Platform=x64
 打安装包（需 NSIS）：
 
 ```
-dotnet publish CelesteViewer.csproj -c Release -p:Platform=x64 -p:RuntimeIdentifier=win-x64 -p:SelfContained=false
+dotnet publish CelesteViewer.csproj -c Release -p:Platform=x64
 makensis.exe installer\CelesteViewer.nsi
 ```
+
+> 发布形态由 `Properties\PublishProfiles\win-x64.pubxml` 决定（框架依赖），
+> 命令行不用再传 `-p:RuntimeIdentifier` / `-p:SelfContained`。
+> 安装包输出到 `dist\CelesteViewer-Setup-<版本>.exe`。
 
 发布流程详见 `installer/README-安装包与更新.md`。
 

@@ -169,4 +169,42 @@
     <PublishTrimmed Condition="'$(SelfContained)' != 'true'">False</PublishTrimmed>
     <PublishTrimmed Condition="'$(Configuration)' != 'Debug' and '$(SelfContained)' == 'true'">True</PublishTrimmed>
   </PropertyGroup>
+
+  <!--
+    ===== 发布时把 PRI 资源索引补进发布目录 =====
+
+    背景：本项目关掉了 MSIX 工具链（见上面 EnableMsixTooling 的说明，那是为了避开
+    VS 设计时构建的 WMC9999），代价是 AppX / PRI 那一整套 target 也不再跑 ——
+    而"把 *.pri 加进待发布列表"正是它们干的活。
+
+    后果极其隐蔽：dotnet publish **不报任何错**，产物看着也齐全（128MB / 56 个文件），
+    但发布目录里根本没有 CelesteViewer.pri。装到机器上一点开就死在 MainWindow 的
+    LoadComponent —— XAML 资源全部索引不到，日志只有一句 0x80004005，看不出跟资源有关。
+    （Debug 构建能跑，所以开发时完全发现不了；只有真正走发布流程才会暴露。）
+
+    实测（2026-09-14）：
+      Debug / Release build 输出目录 → 有 CelesteViewer.pri，能跑
+      Release publish 目录          → 一个 .pri 都没有，必崩
+      手工把 CelesteViewer.pri 复制进发布目录 → 立刻恢复正常（存活，致命错误 0 条）
+      对照 CelesteMusicPlayer 的发布目录 → 它也只有 <App>.pri、没有 xbf 散文件，
+      说明 xbf 已经被索引进 pri 里了，不需要单独复制 xbf。
+
+    修法：编译阶段 pri 已经躺在 $(OutDir) 里了，这里在 publish 收尾补一次复制。
+    只复制 $(MSBuildProjectName).pri（本应用自己的资源索引）——
+    Microsoft.UI.pri / Microsoft.WindowsAppRuntime.pri 那几个在框架依赖模式下
+    由 Windows App Runtime 的 MSIX 包提供，本地再放一份反而可能跟包版本打架。
+
+    自包含发布（-p:SelfContained=true）时同样需要这个，所以不加条件。
+  -->
+  <Target Name="CelesteCopyPriToPublish" AfterTargets="Publish">
+    <Copy SourceFiles="$(OutDir)$(MSBuildProjectName).pri"
+          DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(OutDir)$(MSBuildProjectName).pri')" />
+    <Message Importance="high"
+             Text="CelesteViewer: PRI 资源索引已补入发布目录 → $(PublishDir)"
+             Condition="Exists('$(OutDir)$(MSBuildProjectName).pri')" />
+    <Warning Text="CelesteViewer: 找不到 $(OutDir)$(MSBuildProjectName).pri —— 发布产物会缺 XAML 资源索引，装上去启动即崩，请检查构建是否完整。"
+             Condition="!Exists('$(OutDir)$(MSBuildProjectName).pri')" />
+  </Target>
 </Project>

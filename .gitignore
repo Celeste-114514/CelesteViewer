@@ -16,3 +16,6 @@ obj/
 # 发布中间产物
 publish/
 *.log
+
+# 安装包输出目录（35MB 的 Setup.exe 不进仓库，只作为 GitHub Release 附件上传）
+dist/

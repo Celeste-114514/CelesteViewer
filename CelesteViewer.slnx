@@ -1,0 +1,32 @@
+<Solution>
+  <Configurations>
+    <Platform Name="ARM64" />
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="CelesteViewer.csproj">
+    <Platform Solution="*|ARM64" Project="ARM64" />
+    <Platform Solution="*|x64" Project="x64" />
+    <Platform Solution="*|x86" Project="x86" />
+    <Deploy />
+  </Project>
+  <!--
+    CelesteViewer.Core 必须在这里登记，不能只靠主项目的 ProjectReference。
+
+    症状：VS 里报 CS0006「未能找到元数据文件 ...\CelesteViewer.Core\bin\Debug\...\CelesteViewer.Core.dll」，
+    但那个 dll 明明在 bin\x64\Debug\ 里躺着。
+
+    原因：MSBuild 解析"不在解决方案里"的项目引用时，会放弃解决方案的配置映射，
+    给它套上默认的 Debug|AnyCPU。于是在 VS 选 x64 的情况下，
+    它去 bin\Debug\（AnyCPU 的输出路径）找产物，自然找不到。
+
+    登记进来并配上平台映射，它就会跟着解决方案走 x64 → 和主项目产物路径一致。
+    （Core 的 Platforms 是 x86;x64;ARM64，没有 AnyCPU，所以更不能让它被当成 AnyCPU 构建 ——
+      AnyCPU 下不会复制 Magick.NET 的 native 解码库，将来遇到 heic/psd 会运行时炸。）
+  -->
+  <Project Path="CelesteViewer.Core\CelesteViewer.Core.csproj">
+    <Platform Solution="*|ARM64" Project="ARM64" />
+    <Platform Solution="*|x64" Project="x64" />
+    <Platform Solution="*|x86" Project="x86" />
+  </Project>
+</Solution>

@@ -7,14 +7,17 @@
 ;   —— 应用内「检查更新」靠文件名里的 Setup 认出这是安装包。
 ;
 ; 发布形态是**框架依赖**（跟 MusicPlayer 一样，不自包含）：
-;   用户机器上必须已有 .NET 9 桌面运行时 和 Windows App SDK 2.x 运行时，
+;   用户机器上必须已有 .NET 9 运行时 和 Windows App SDK 2.x 运行时，
 ;   否则双击没反应。所以安装前先查这两个，缺哪个就提示去下载哪个。
 
 ; ---------- Metadata ----------
 !define APP_NAME "CelesteViewer"
 !define APP_VERSION "26.9.14"
 !define APP_EXE "CelesteViewer.exe"
-!define PUBLISH_DIR "C:\Users\admin\source\repos\CelesteViewer\bin\Release\net9.0-windows10.0.26100.0\win-x64\publish"
+; 发布目录注意带 x64 一层 —— 跟 CelesteViewer.csproj 里
+; CelesteCopyPriToPublish 那个 target 的输出保持一致，
+; 否则会打进一个缺 CelesteViewer.pri 的残缺发布目录（启动即崩）。
+!define PUBLISH_DIR "C:\Users\admin\source\repos\CelesteViewer\bin\x64\Release\net9.0-windows10.0.26100.0\win-x64\publish"
 !define APP_GUID "{7B4E1D92-3C5A-4F18-9D60-2A8C7E5B41F3}"
 !define REG_UNINST "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
 !define REG_RUN "Software\Microsoft\Windows\CurrentVersion\Run"
@@ -26,7 +29,9 @@ Unicode true
 ; User-level install, no admin needed
 RequestExecutionLevel user
 Name "${APP_NAME}"
-OutFile "C:\Users\admin\Desktop\CelesteViewer-Setup-${APP_VERSION}.exe"
+; 安装包落在项目的 dist\ 目录（不往桌面丢东西），上传 GitHub Release 也从这里取。
+; 文件名必须是 CelesteViewer-Setup-<版本>.exe —— 应用内「检查更新」靠 Setup 字样认出安装包。
+OutFile "C:\Users\admin\source\repos\CelesteViewer\dist\CelesteViewer-Setup-${APP_VERSION}.exe"
 InstallDir "$LOCALAPPDATA\Programs\${APP_NAME}"
 InstallDirRegKey HKCU "Software\${APP_NAME}" "InstallLocation"
 SetCompressor lzma
@@ -58,26 +63,57 @@ SetCompressor lzma
 
 ; ---------- 运行时检测 ----------
 Var MissingList
+Var MissingDotnet
+Var MissingWasdk
 
-; 列出缺哪些运行组件，结果拼进 $MissingList（为空 = 什么都有）
+; 查缺哪些运行组件。$MissingList 是给用户看的清单（为空 = 什么都有），
+; $MissingDotnet / $MissingWasdk 是标志位，用来决定打开哪个下载页。
 Function DetectRuntimes
   StrCpy $MissingList ""
+  StrCpy $MissingDotnet "0"
+  StrCpy $MissingWasdk "0"
 
-  ; ---- 1. .NET 9 桌面运行时 ----
-  ; 判据：dotnet 安装目录下存在 shared\Microsoft.WindowsDesktop.App\9.* 子目录。
-  ; 不看注册表是因为不同安装方式（SDK / 运行时 / 独立安装器）写的位置不统一，
-  ; 而 shared 目录是运行时一定会建的。
+  ; ---- 1. .NET 9 运行时 ----
+  ; 判据：dotnet 的 shared 目录下存在 Microsoft.NETCore.App\9.* 子目录。
+  ;
+  ; 为什么查 NETCore.App 而不是 WindowsDesktop.App：
+  ;   本项目发布产物的 runtimeconfig.json 里只声明了一个框架 ——
+  ;     "framework": { "name": "Microsoft.NETCore.App", "version": "9.0.0" }
+  ;   因为主项目只开了 UseWinUI，没开 UseWPF / UseWindowsForms。
+  ;   （对照：CelesteMusicPlayer 的 runtimeconfig 声明了 NETCore.App +
+  ;    WindowsDesktop.App 两个，所以它那边查 Desktop 才对。）
+  ;   本项目查 Desktop 是错的判据：装齐了 NETCore.App 也会被误报成"缺运行时"。
+  ;
+  ; 为什么不查注册表：.NET 的注册表项只记录"装过 host"，不区分装了哪些运行时版本，
+  ; 而 shared 目录是运行时落地时一定会建的，最准。
+  ; 查两个位置是为了覆盖安装方式差异 —— 官方安装器 / VS 装到 Program Files，
+  ; winget --scope user 之类的会装到用户目录。
   StrCpy $R0 "0"
-  FindFirst $R1 $R2 "$PROGRAMFILES64\dotnet\shared\Microsoft.WindowsDesktop.App\9.*"
+
+  ; 1a. 全机安装位置
+  FindFirst $R1 $R2 "$PROGRAMFILES64\dotnet\shared\Microsoft.NETCore.App\9.*"
 net9_loop:
-  StrCmp $R2 "" net9_done
+  StrCmp $R2 "" net9_probe_user
   StrCpy $R0 "1"
   FindNext $R1 $R2
   Goto net9_loop
+
+  ; 1b. 用户级安装位置
+net9_probe_user:
+  FindClose $R1
+  StrCmp $R0 "1" net9_ok
+  FindFirst $R1 $R2 "$LOCALAPPDATA\Microsoft\dotnet\shared\Microsoft.NETCore.App\9.*"
+net9_loop2:
+  StrCmp $R2 "" net9_done
+  StrCpy $R0 "1"
+  FindNext $R1 $R2
+  Goto net9_loop2
+
 net9_done:
   FindClose $R1
   StrCmp $R0 "1" net9_ok
-  StrCpy $MissingList "$MissingList  · .NET 9 桌面运行时（.NET 9 Desktop Runtime）$\r$\n"
+  StrCpy $MissingDotnet "1"
+  StrCpy $MissingList "$MissingList  · .NET 9 运行时（.NET 9 Runtime，装 Desktop 版最省事）$\r$\n"
 net9_ok:
 
   ; ---- 2. Windows App SDK 2.x 运行时 ----
@@ -89,6 +125,7 @@ net9_ok:
   Pop $R1
   StrCmp $R0 "0" wasdk_ok
   StrCmp $R0 "error" wasdk_ok        ; 查不出来就别吓唬人，当它装了
+  StrCpy $MissingWasdk "1"
   StrCpy $MissingList "$MissingList  · Windows App SDK 运行时（WindowsAppRuntime 2.x）$\r$\n"
 wasdk_ok:
 FunctionEnd
@@ -98,17 +135,21 @@ Function .onInit
   StrCmp $MissingList "" all_ok
 
   MessageBox MB_YESNO|MB_ICONEXCLAMATION \
-    "检测到这台电脑上还缺以下运行组件：$\r$\n$\r$\n$MissingList$\r$\n缺了它们，装完双击也是没反应。$\r$\n$\r$\n现在打开下载页面？（装好后重新运行本安装包即可）" \
+    "检测到这台电脑上还缺以下运行组件：$\r$\n$\r$\n$MissingList$\r$\n缺了它们，装完双击也没反应。$\r$\n$\r$\n现在打开下载页面？装好之后重新运行本安装包即可。" \
     IDNO skip_open
 
-  ; 两个页面都开，用户按提示里的顺序装就行
+  ; 只开真正缺的那个页面 —— 缺一个就开一个，别一股脑弹两个标签
+  StrCmp $MissingDotnet "1" 0 open_wasdk
   ExecShell "open" "${DOTNET_URL}"
+open_wasdk:
+  StrCmp $MissingWasdk "1" 0 open_done
   ExecShell "open" "${WASDK_URL}"
+open_done:
   Quit
 
 skip_open:
   MessageBox MB_OK|MB_ICONINFORMATION \
-    "已跳过下载。安装会继续，但运行组件补齐之前程序无法启动。"
+    "已跳过下载。安装会继续，但运行组件补齐之前程序无法启动。$\r$\n$\r$\n补齐后直接打开 ${APP_NAME} 即可，不用重装。"
 
 all_ok:
 FunctionEnd
@@ -148,7 +189,9 @@ Section "创建开始菜单快捷方式" SEC_STARTMENU
   CreateShortCut "$SMPROGRAMS\${APP_NAME}\卸载 ${APP_NAME}.lnk" "$INSTDIR\uninstall.exe" "" "$INSTDIR\uninstall.exe" 0
 SectionEnd
 
-Section "开机自动启动" SEC_AUTORUN
+; /o = 默认不勾选。看图器没必要开机就在后台待着（那是音乐播放器的需求），
+; 想让它自启的用户在安装时自己勾一下就行。
+Section /o "开机自动启动" SEC_AUTORUN
   WriteRegStr HKCU "${REG_RUN}" "${APP_NAME}" '"$INSTDIR\${APP_EXE}"'
 SectionEnd
 
