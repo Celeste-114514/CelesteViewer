@@ -42,7 +42,14 @@ SetCompressor lzma
 
 ; ---------- Modern UI 2 ----------
 !insertmacro MUI_PAGE_WELCOME
+
+; 离开"选择安装位置"页之前，先确认这个位置真能写。
+; 细节和原因见下面的 CheckDirWritable 函数 —— 不加这道校验的话，
+; 用户把路径选到 C:\Program Files\ 只会得到一个看不懂的
+; "无法打开要写入的文件"，根本猜不到是权限问题（2026-09-14 实际踩到）。
+!define MUI_PAGE_CUSTOMFUNCTION_LEAVE CheckDirWritable
 !insertmacro MUI_PAGE_DIRECTORY
+
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_INSTFILES
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${APP_EXE}"
@@ -65,6 +72,46 @@ SetCompressor lzma
 Var MissingList
 Var MissingDotnet
 Var MissingWasdk
+Var DirProbe
+
+; ---------- 安装位置可写性校验 ----------
+; 在"选择安装位置"页点「下一步」时调用（MUI_PAGE_CUSTOMFUNCTION_LEAVE）。
+;
+; 为什么要有这道校验：
+;   本安装包是**免管理员**运行的（RequestExecutionLevel user），默认装在
+;   %LOCALAPPDATA%\Programs\ 下，全程不弹 UAC —— 这是和 CelesteMusicPlayer
+;   保持一致的设计。
+;   但向导允许改路径，而"装到 C:\Program Files\" 是很多人的习惯。普通权限
+;   根本写不进那个目录，NSIS 报出来的却是 "无法打开要写入的文件" —— 完全
+;   看不出跟权限有关，用户只会以为安装包坏了。
+;   所以在这一步就拦住，说清原因、给出能走的路，而不是等复制文件时才炸。
+;
+; 校验方式：真往目标目录写一个临时文件，写得进去才算过。
+;   比读 ACL 可靠 —— 不关心"为什么不能写"（权限不足 / 只读属性 / 组策略），
+;   只要写不进去，安装过程就一定会失败。
+Function CheckDirWritable
+  CreateDirectory "$INSTDIR"
+
+  ClearErrors
+  FileOpen $DirProbe "$INSTDIR\.cv_write_test.tmp" w
+  IfErrors dir_not_writable
+  FileClose $DirProbe
+  Delete "$INSTDIR\.cv_write_test.tmp"
+  Goto dir_check_done
+
+dir_not_writable:
+  MessageBox MB_YESNO|MB_ICONEXCLAMATION \
+"这个位置装不进去：$\r$\n$\r$\n$INSTDIR$\r$\n$\r$\n它需要管理员权限，而本安装程序是免管理员运行的，往这里写文件会被系统拒绝（就是“无法打开要写入的文件”这个报错）。$\r$\n$\r$\n推荐位置：$LOCALAPPDATA\Programs\${APP_NAME}$\r$\n$\r$\n点「是」= 用推荐位置继续安装$\r$\n点「否」= 退回去，自己换一个能写的位置（比如 D 盘建个文件夹）$\r$\n$\r$\n如果确实要装在这个位置：先关掉本窗口，右键安装包选“以管理员身份运行”。" \
+    IDYES dir_use_default IDNO dir_keep_user
+
+dir_keep_user:
+  Abort        ; 留在目录页，让用户自己改
+
+dir_use_default:
+  StrCpy $INSTDIR "$LOCALAPPDATA\Programs\${APP_NAME}"
+
+dir_check_done:
+FunctionEnd
 
 ; 查缺哪些运行组件。$MissingList 是给用户看的清单（为空 = 什么都有），
 ; $MissingDotnet / $MissingWasdk 是标志位，用来决定打开哪个下载页。
