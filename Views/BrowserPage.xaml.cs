@@ -97,13 +97,33 @@ public sealed partial class BrowserPage : Page
     private DispatcherQueueTimer? _searchDebounce;
 
     /// <summary>
+    /// 用户手动选的排序方式。null = "默认（跟随分类）"。
+    ///
+    /// 为什么默认值不是一个具体的 SortKey、而是 null：
+    /// 按文件夹时"文件名升序"最自然（和资源管理器一致），
+    /// 按日期/相机时"拍摄时间倒序"最自然（刚拍的在最前）。
+    /// 把它记成"跟随分类"，换分类时顺序也跟着换，不用用户自己再调一次。
+    /// </summary>
+    private SortKey? _sortOverride;
+
+    /// <summary>当前真正生效的排序。没手动选过就跟着分类走。</summary>
+    private SortKey EffectiveSort()
+        => _sortOverride ?? (_groupBy == GroupBy.Folder
+            ? SortKey.FileNameAsc
+            : SortKey.DateTakenDesc);
+
+    /// <summary>
     /// 是不是走在"查索引"这条路上。
     ///
     /// 只有按日期/相机/镜头分，或者搜索框里有字时才为 true；
     /// 按文件夹空搜索时照旧直接读磁盘 —— 那条路不用等索引、不会被索引影响。
     /// </summary>
     private bool IndexMode => _groupBy != GroupBy.Folder
-                              || !string.IsNullOrWhiteSpace(_searchText);
+                              || !string.IsNullOrWhiteSpace(_searchText)
+                              || _favOnly;   // 收藏只存在于索引库里，开了它就必须走查库这条路
+
+    /// <summary>"只看收藏"开关。开着时永远走索引那条路（磁盘直读没有收藏的概念）。</summary>
+    private bool _favOnly;
 
     /// <summary>是否处于多选模式（工具栏"选择"按钮或右键"选择多项"进入）。</summary>
     private bool _multiSelect;
@@ -189,6 +209,13 @@ public sealed partial class BrowserPage : Page
             _restoringSettings = true;
             IncludeSubSwitch.IsOn = AppSettings.GetBool("IncludeSubfolders", false);
             _restoringSettings = false;
+
+            // 排序也要在载入目录之前恢复好，否则第一屏会先按默认顺序铺一遍再重排
+            string? sort = AppSettings.Get("SortKey");
+            if (!string.IsNullOrEmpty(sort) && Enum.TryParse<SortKey>(sort, out SortKey k))
+                _sortOverride = k;
+
+            SyncSortUi();
         }
         catch { }
 
@@ -384,8 +411,10 @@ public sealed partial class BrowserPage : Page
         Text = string.IsNullOrWhiteSpace(_searchText) ? null : _searchText,
         Group = _groupBy,
         GroupValue = _groupValue,
-        // 按文件夹时保持"跟资源管理器一样的名字顺序"，其余维度按拍摄时间倒序更实用
-        Sort = _groupBy == GroupBy.Folder ? SortKey.FileNameAsc : SortKey.DateTakenDesc,
+        FavoritesOnly = _favOnly,
+        // 按文件夹时保持"跟资源管理器一样的名字顺序"，其余维度按拍摄时间倒序更实用。
+        // 用户在排序菜单里选过的话以他选的为准。
+        Sort = EffectiveSort(),
     };
 
     /// <summary>
@@ -699,6 +728,42 @@ public sealed partial class BrowserPage : Page
         flyout.Items.Add(MakeMenuItem("在资源管理器中显示", "\uE838",
             () => ExplorerHelper.RevealFile(item.Path)));
         flyout.Items.Add(new MenuFlyoutSeparator());
+
+        if (LibraryIndexService.Shared.Available)
+        {
+            // 评分子菜单：0 星 = 取消评分
+            var svc = LibraryIndexService.Shared;
+            int current = svc.RatingOf(item.Path);
+
+            var rate = new MenuFlyoutSubItem
+            {
+                Text = current > 0 ? $"评分　{new string('★', current)}" : "评分",
+                Icon = new FontIcon { Glyph = "\uE734" },   // ☆
+            };
+
+            for (int s = 5; s >= 0; s--)
+            {
+                int stars = s;   // 闭包要抓副本，不能直接用循环变量
+                string label = s == 0
+                    ? "取消评分"
+                    : new string('★', s);
+
+                if (s == current) label += "　✓";
+
+                rate.Items.Add(MakeMenuItem(label, s > 0 ? "\uE735" : "\uE8D9",
+                    () => ApplyRating(item, stars)));
+            }
+
+            flyout.Items.Add(rate);
+
+            bool fav = svc.IsFavorite(item.Path);
+            flyout.Items.Add(MakeMenuItem(fav ? "取消收藏" : "收藏",
+                fav ? "\uE8D9" : "\uE735", () => ToggleFavorite(item)));
+
+            // E8EC = Tag
+            flyout.Items.Add(MakeMenuItem("标签…", "\uE8EC", () => _ = EditTagsAsync(item)));
+            flyout.Items.Add(new MenuFlyoutSeparator());
+        }
         flyout.Items.Add(MakeMenuItem("选择多项", "\uE73A", () => EnterMultiSelectFrom(item)));
         flyout.Items.Add(MakeMenuItem("属性", "\uE946", () => ShowProperties(item)));
         flyout.Items.Add(new MenuFlyoutSeparator());
@@ -721,6 +786,98 @@ public sealed partial class BrowserPage : Page
 
     /// <summary>右键菜单"属性"：弹出一个居中的属性窗口（见 PropertiesWindow）。</summary>
     private void ShowProperties(ThumbnailItem item) => PropertiesWindow.Show(item.Path);
+
+    // ===== 用户数据：评分 / 收藏 / 标签 =====
+    //
+    // 这三样只存在索引库里（第 3 版表结构），图库重扫不会丢。
+    // 索引不可用时右键菜单里根本不会出现这些项，所以这里不做兜底判断。
+
+    private void ApplyRating(ThumbnailItem item, int stars)
+        => LibraryIndexService.Shared.SetRating(item.Path, stars);
+
+    private void ToggleFavorite(ThumbnailItem item)
+    {
+        LibraryIndexService.Shared.ToggleFavorite(item.Path);
+
+        // "只看收藏"开着的时候，取消收藏意味着这张图不该再留在墙上
+        if (_favOnly && IndexMode) _ = LoadFromIndexAsync();
+    }
+
+    /// <summary>弹个小对话框编辑标签。存的是整批替换：清空文本框 = 删光标签。</summary>
+    private async Task EditTagsAsync(ThumbnailItem item)
+    {
+        var svc = LibraryIndexService.Shared;
+
+        var input = new TextBox
+        {
+            PlaceholderText = "用空格或逗号分开，比如：旅行 家人",
+            Text = string.Join("  ", svc.GetTags(item.Path)),
+        };
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = this.XamlRoot,
+            Title = $"标签 — {item.FileName}",
+            Content = input,
+            PrimaryButtonText = "保存",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Primary,
+        };
+
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+
+        // "旅行, 家人 朋友" → ["旅行", "家人", "朋友"]。空段丢掉，重复段去重。
+        var tags = (input.Text ?? string.Empty)
+            .Split(new[] { ' ', ',', '，', ';', '；' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(t => t.Trim())
+            .Where(t => t.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        svc.SetTags(item.Path, tags);
+
+        // 开着"只看收藏"或以后有"按标签筛"时保持视图同步
+        if (_favOnly && IndexMode) await LoadFromIndexAsync();
+    }
+
+    // ===== 工具栏"只看收藏"开关 =====
+
+    private async void FavToggle_Checked(object sender, RoutedEventArgs e)
+    {
+        var svc = LibraryIndexService.Shared;
+
+        // 索引用不了就别硬开：开关弹回去，提示一句话
+        if (!svc.Available)
+        {
+            _favOnly = false;
+            try { FavToggle.IsChecked = false; } finally { UpdateFavIcon(); }
+            ShowEmpty("索引库打不开，收藏功能暂时用不了");
+            return;
+        }
+
+        _favOnly = true;
+        UpdateFavIcon();
+
+        // 从"按文件夹、无搜索"的纯磁盘模式切过来的话，把旧的模式残留清掉，
+        // 跟 ApplySearchAsync 切索引模式时的处理保持一致
+        if (_groupBy == GroupBy.Folder && string.IsNullOrWhiteSpace(_searchText))
+            _groupValue = null;
+
+        await SwitchToIndexModeAsync();
+    }
+
+    private async void FavToggle_Unchecked(object sender, RoutedEventArgs e)
+    {
+        _favOnly = false;
+        UpdateFavIcon();
+
+        // 只在查库模式下需要刷新；正常顺序是先 Checked（切到索引）再 Unchecked，
+        // 所以这里几乎总是 IndexMode == true
+        if (IndexMode) await LoadFromIndexAsync();
+    }
+
+    /// <summary>E734 空心星 = 没开；E735 实心星 = 开着。跟右键菜单里用的图标一致。</summary>
+    private void UpdateFavIcon() => FavIcon.Glyph = _favOnly ? "\uE735" : "\uE734";
 
     /// <summary>右键点在墙的空白处（没落在某张图上）。</summary>
     private void Wall_ContextRequested(UIElement sender, ContextRequestedEventArgs args)
@@ -869,7 +1026,14 @@ public sealed partial class BrowserPage : Page
         {
             // 扫盘必须放后台线程。只扫一层还看不出来，但开了"包含子文件夹"
             // 又点到层级很深的大目录时，在 UI 线程上同步扫会直接把窗口冻住
-            (files, truncated) = await Task.Run(() => Scan(folder, includeSub));
+            // 排序也放进后台：按大小 / 时间排要给每个文件取一次属性，
+            // 上千张时在 UI 线程上做会明显卡一下
+            (files, truncated) = await Task.Run(() =>
+            {
+                var r = Scan(folder, includeSub);
+                SortDiskFiles(r.Files);
+                return r;
+            });
         }
         catch (Exception ex)
         {
@@ -974,6 +1138,72 @@ public sealed partial class BrowserPage : Page
     }
 
     /// <summary>
+    /// "直接读磁盘"那条路（按文件夹浏览）的排序。
+    ///
+    /// 索引那条路交给 SQLite，又快又准；这条没有元数据可用，只能就地算：
+    ///   · 文件名       → 自然序（IMG_2 排在 IMG_10 前面，和索引那条路口径一致）
+    ///   · 文件大小     → 逐个取文件长度
+    ///   · 拍摄时间     → 逐个取文件修改时间
+    ///
+    /// 最后一条要说清楚：按文件夹浏览时压根没读过 EXIF，所以用的是修改时间。
+    /// 而索引库里"没有 EXIF 的图"用的也正是修改时间（见 MediaIndex），
+    /// 也就是说两边的"拍摄时间"在没有 EXIF 的时候是同一个东西，不会自相矛盾。
+    /// </summary>
+    private void SortDiskFiles(List<(string Path, string? Sub)> files)
+    {
+        if (files.Count < 2) return;
+
+        switch (EffectiveSort())
+        {
+            case SortKey.FileNameAsc:
+                files.Sort((a, b) => FolderIndex.CompareNatural(
+                    Path.GetFileName(a.Path), Path.GetFileName(b.Path)));
+                break;
+
+            case SortKey.FileNameDesc:
+                files.Sort((a, b) => FolderIndex.CompareNatural(
+                    Path.GetFileName(b.Path), Path.GetFileName(a.Path)));
+                break;
+
+            case SortKey.FileSizeDesc:
+            {
+                // 每个文件的大小只取一次：比较器会被调用 O(n·log n) 次，
+                // 每次都 new 一个 FileInfo 的话，一千张图就是几万次系统调用
+                var size = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+                foreach (var f in files) size[f.Path] = SafeLength(f.Path);
+
+                files.Sort((a, b) => size[b.Path].CompareTo(size[a.Path]));
+                break;
+            }
+
+            case SortKey.DateTakenDesc:
+            case SortKey.DateTakenAsc:
+            {
+                var time = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+                foreach (var f in files) time[f.Path] = SafeWriteTime(f.Path);
+
+                // 注意不能写成 cond ? 升序lambda : 降序lambda ——
+                // 两个 lambda 没有共同类型，条件表达式推不出来，编译不过
+                if (EffectiveSort() == SortKey.DateTakenDesc)
+                    files.Sort((a, b) => time[b.Path].CompareTo(time[a.Path]));
+                else
+                    files.Sort((a, b) => time[a.Path].CompareTo(time[b.Path]));
+                break;
+            }
+        }
+    }
+
+    private static long SafeLength(string path)
+    {
+        try { return new FileInfo(path).Length; } catch { return 0; }
+    }
+
+    private static DateTime SafeWriteTime(string path)
+    {
+        try { return File.GetLastWriteTimeUtc(path); } catch { return default; }
+    }
+
+    /// <summary>
     /// 空目录该说什么，分三种情况。
     ///
     /// 最要紧的是第二种：目录自己一张图都没有、图全在子目录里 ——
@@ -1021,7 +1251,8 @@ public sealed partial class BrowserPage : Page
         _groupBy = by;
         _groupValue = null;
 
-        bool folderMode = by == GroupBy.Folder && string.IsNullOrWhiteSpace(_searchText);
+        // 收藏开关开着时不允许退回"直接读磁盘"——收藏在索引里，磁盘上没有
+        bool folderMode = by == GroupBy.Folder && string.IsNullOrWhiteSpace(_searchText) && !_favOnly;
 
         // "包含子文件夹"只对"直接读磁盘"那条路有意义：
         // 索引模式下图库里的目录（含子目录）全都收进来了，这个开关没有作用对象
@@ -1494,6 +1725,99 @@ public sealed partial class BrowserPage : Page
     }
 
     private void SizePresetToggle_Unchecked(object sender, RoutedEventArgs e) { }
+
+    // ===== 排序（只管右侧这一屏的顺序） =====
+
+    /// <summary>排序菜单里的六个选项。XAML 解析期可能有几个还是 null，所以是 nullable。</summary>
+    private ToggleButton?[] SortToggles()
+        => new[]
+        {
+            SortDefaultToggle, SortNameAscToggle, SortNameDescToggle,
+            SortDateDescToggle, SortDateAscToggle, SortSizeDescToggle,
+        };
+
+    /// <summary>
+    /// 同步勾选状态时置起这个标记，避免"设 IsChecked"反过来又触发一次重新载入。
+    /// 启动时恢复上次设置会走这条路 —— 那会儿可不该再读一遍目录。
+    /// </summary>
+    private bool _sortUiSyncing;
+
+    private void SortToggle_Checked(object sender, RoutedEventArgs e)
+    {
+        if (_sortUiSyncing) return;
+        if (sender is not ToggleButton tb) return;
+
+        // 六个互斥：勾上这个就把其余的取消
+        foreach (var t in SortToggles())
+            if (t is not null && !ReferenceEquals(t, tb)) t.IsChecked = false;
+
+        SortKey? pick = null;
+        if (tb.Tag is string tag && Enum.TryParse<SortKey>(tag, out SortKey k)) pick = k;
+
+        // 同 SetLayout：解析期 XAML 还没建完，别去碰别的控件
+        if (Thumbs is null) return;
+
+        if (pick == _sortOverride) return;
+        _sortOverride = pick;
+
+        AppSettings.Set("SortKey", pick?.ToString() ?? string.Empty);
+        StartupLog.Write($"BrowserPage: 排序 = {pick?.ToString() ?? "默认（跟随分类）"}");
+
+        _ = ReloadCurrentViewAsync();
+    }
+
+    /// <summary>
+    /// 已经勾着的那个再点一下会被取消勾选，结果六个全空、看着很懵。
+    /// 排序任何时候都得有一个生效值，所以这里把它按回去。
+    /// </summary>
+    private void SortToggle_Unchecked(object sender, RoutedEventArgs e)
+    {
+        if (_sortUiSyncing) return;
+        if (sender is not ToggleButton tb) return;
+
+        foreach (var t in SortToggles())
+            if (t is not null && t.IsChecked == true) return;   // 还有别人勾着，不管
+
+        _sortUiSyncing = true;
+        try { tb.IsChecked = true; } finally { _sortUiSyncing = false; }
+    }
+
+    /// <summary>把菜单里的勾选对齐到当前生效的排序（启动时恢复设置用）。</summary>
+    private void SyncSortUi()
+    {
+        _sortUiSyncing = true;
+        try
+        {
+            SortKey? cur = _sortOverride;
+
+            SetToggle(SortDefaultToggle, cur is null);
+            SetToggle(SortNameAscToggle, cur == SortKey.FileNameAsc);
+            SetToggle(SortNameDescToggle, cur == SortKey.FileNameDesc);
+            SetToggle(SortDateDescToggle, cur == SortKey.DateTakenDesc);
+            SetToggle(SortDateAscToggle, cur == SortKey.DateTakenAsc);
+            SetToggle(SortSizeDescToggle, cur == SortKey.FileSizeDesc);
+        }
+        finally { _sortUiSyncing = false; }
+    }
+
+    private static void SetToggle(ToggleButton? tb, bool on)
+    {
+        if (tb is not null) tb.IsChecked = on;
+    }
+
+    /// <summary>按当前条件重新铺一屏（换了排序之后用）。</summary>
+    private async Task ReloadCurrentViewAsync()
+    {
+        if (IndexMode)
+        {
+            // 只重查右侧，不重建左边的树 —— 重建会把用户选中的分组高亮弄丢
+            await LoadFromIndexAsync();
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_currentFolder))
+            await LoadFolderAsync(_currentFolder);
+    }
 
     /// <summary>
     /// 展开子目录时，新冒出来的节点淡入 + 从上往下轻微滑入（比"啪"地一下硬弹出好看得多）。

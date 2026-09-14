@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using CelesteViewer.Services;
 using ImageMagick;
+using Microsoft.Data.Sqlite;
 
 namespace CelesteViewer.IndexHarness;
 
@@ -49,6 +50,7 @@ internal static class Program
         NaturalSort();
         await Signature();
         await MagickFallback();
+        UserData();
 
         Console.WriteLine();
         Console.WriteLine(_fail == 0 ? "==== 全部通过 ====" : $"==== 有 {_fail} 项失败 ====");
@@ -896,4 +898,155 @@ internal static class Program
         int scanned, int allowed, int threw, int ok, int gaveUp,
         Dictionary<string, int> byExtNull, Dictionary<string, int> byExt, List<string> samples)
         => new(scanned, allowed, threw, ok, gaveUp, byExtNull, byExt, samples);
+
+    // ============ F. 评分 / 收藏 / 标签（用户数据，丢不得） ============
+
+    private static PhotoInfo Photo(string path) => new()
+    {
+        Path = path,
+        FileSize = 1000,
+        PixelWidth = 800,
+        PixelHeight = 600,
+        LastModified = new DateTimeOffset(2026, 5, 1, 12, 0, 0, TimeSpan.Zero),
+        DateTaken = new DateTimeOffset(2026, 5, 1, 12, 0, 0, TimeSpan.Zero),
+    };
+
+    private static void UserData()
+    {
+        Console.WriteLine();
+        Console.WriteLine("==== F. 评分 / 收藏 / 标签（用户数据）====");
+        Console.WriteLine();
+
+        string db = Path.Combine(Path.GetTempPath(), "cv-user-test.db");
+        foreach (string s in new[] { "", "-wal", "-shm" })
+        { try { File.Delete(db + s); } catch { } }
+
+        using var index = new MediaIndex(db);
+
+        const string a = @"D:\Photos\a.jpg";
+        const string b = @"D:\Photos\b.jpg";
+        const string c = @"D:\Photos\c.jpg";
+
+        index.Upsert(Photo(a));
+        index.Upsert(Photo(b));
+        index.Upsert(Photo(c));
+
+        // ---- 评分 ----
+        index.SetRating(a, 5);
+        index.SetRating(b, 3);
+        Check("评分能写能读", index.GetRating(a) == 5 && index.GetRating(b) == 3,
+              $"a={index.GetRating(a)} b={index.GetRating(b)}");
+        Check("没评过的是 0 星", index.GetRating(c) == 0);
+
+        index.SetRating(b, 99);
+        Check("评分超出范围被夹到 5 星", index.GetRating(b) == 5, $"{index.GetRating(b)} 星");
+        index.SetRating(b, 3);
+
+        // ---- 收藏 ----
+        index.SetFavorite(a, true);
+        index.SetFavorite(b, true);
+        Check("收藏能写能读",
+              index.IsFavorite(a) && index.IsFavorite(b) && !index.IsFavorite(c));
+        Check("收藏数量对得上", index.CountFavorites() == 2, $"{index.CountFavorites()} 张");
+
+        // ---- 标签 ----
+        index.SetTags(a, new[] { "旅行", "家人" });
+        index.SetTags(b, new[] { "旅行" });
+        index.AddTag(b, "travel");      // 英文另算一个标签
+        index.AddTag(b, "旅行");         // 重复加不该产生第二行
+        Check("标签能写能读", index.GetTags(a).Count == 2, string.Join("、", index.GetTags(a)));
+        Check("同一个标签重复加不会重复",
+              index.GetTags(b).Count(t => t == "旅行") == 1, string.Join("、", index.GetTags(b)));
+
+        index.RemoveTag(a, "家人");
+        Check("删标签生效", !index.GetTags(a).Contains("家人"));
+
+        var all = index.AllTags();
+        Check("标签统计对得上（旅行 2 张、travel 1 张）",
+              all.Count == 2 && all[0].Tag == "旅行" && all[0].Count == 2,
+              string.Join("、", all.Select(t => $"{t.Tag}×{t.Count}")));
+
+        // ---- 最要紧的一条：重扫不能冲掉用户数据 ----
+        // 图被改过时要重新读 EXIF，那条 SQL 走的是 ON CONFLICT DO UPDATE。
+        // 它要是顺手把 Favorite / Rating 覆盖回默认值，
+        // 用户每整理一次图库评分就全没了 —— 最容易踩、后果最严重的一个坑。
+        index.Upsert(new PhotoInfo
+        {
+            Path = a, FileSize = 999, PixelWidth = 10, PixelHeight = 10,
+            LastModified = DateTimeOffset.UtcNow,
+        });
+        Check("重扫一遍：评分没被冲掉", index.GetRating(a) == 5, $"{index.GetRating(a)} 星");
+        Check("重扫一遍：收藏没被冲掉", index.IsFavorite(a));
+        Check("重扫一遍：标签没被冲掉",
+              index.GetTags(a).Count == 1, string.Join("、", index.GetTags(a)));
+
+        // ---- 查询 ----
+        var fav = index.Query(new MediaQuery { FavoritesOnly = true });
+        Check("只查收藏：数量和 CountFavorites 对得上",
+              fav.Count == index.CountFavorites(), $"{fav.Count} 张");
+
+        var travel = index.Query(new MediaQuery { Tag = "旅行" });
+        Check("按标签查：两张都捞出来",
+              travel.Count == 2 && travel.Contains(a) && travel.Contains(b), $"{travel.Count} 张");
+
+        var four = index.Query(new MediaQuery { MinRating = 4 });
+        Check("按最低评分查：只剩 5 星那张",
+              four.Count == 1 && four[0] == a, $"{four.Count} 张");
+
+        // 左栏的分组和右栏的查询必须用同一套筛选条件，
+        // 否则"收藏"写着 2 张、点进去只有 1 张
+        var favByDate = index.Group(GroupBy.Date, new MediaQuery { FavoritesOnly = true });
+        Check("分组也认「只收藏」这个条件（左右不能对不上）",
+              favByDate.Sum(g => g.Count) == 2, $"{favByDate.Sum(g => g.Count)} 张");
+
+        // ---- 删图要连标签一起删 ----
+        index.Remove(b);
+        Check("删掉一张图：它的标签跟着没了（不留幽灵标签）",
+              index.AllTags().All(t => t.Tag != "travel"),
+              string.Join("、", index.AllTags().Select(t => t.Tag)));
+
+        CheckMigrate();
+    }
+
+    /// <summary>
+    /// 造一个"v2 时期"的老库（有评分、没有 Favorite 列和 Tags 表），
+    /// 让新代码去打开它 —— 评分必须还在，新功能必须能用。
+    ///
+    /// 这条专门防"升表结构时图省事直接删表重建"：
+    /// 库里只有派生数据的时候那样写看不出问题，
+    /// 一旦存了用户数据就是**静默清零**，用户还不知道发生了什么。
+    /// </summary>
+    private static void CheckMigrate()
+    {
+        string db = Path.Combine(Path.GetTempPath(), "cv-migrate-test.db");
+        foreach (string s in new[] { "", "-wal", "-shm" })
+        { try { File.Delete(db + s); } catch { } }
+
+        const string p = @"D:\Photos\old.jpg";
+
+        using (var old = new MediaIndex(db))
+        {
+            old.Upsert(Photo(p));
+            old.SetRating(p, 4);
+        }
+
+        // 把版本号压回 2，模拟"这是一个还没升过级的老库"
+        using (var conn = new SqliteConnection($"Data Source={db}"))
+        {
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "PRAGMA user_version = 2;";
+            cmd.ExecuteNonQuery();
+        }
+
+        using var upgraded = new MediaIndex(db);
+        Check("老库升级：评分保住了", upgraded.GetRating(p) == 4, $"{upgraded.GetRating(p)} 星");
+
+        upgraded.SetFavorite(p, true);
+        Check("老库升级：新加的收藏列能用", upgraded.IsFavorite(p));
+
+        upgraded.SetTags(p, new[] { "老照片" });
+        Check("老库升级：新加的标签表能用",
+              upgraded.GetTags(p).Count == 1, string.Join("、", upgraded.GetTags(p)));
+    }
 }

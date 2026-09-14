@@ -109,6 +109,7 @@
                             <ComboBoxItem Content="按日期" Tag="Date"/>
                             <ComboBoxItem Content="按相机" Tag="Camera"/>
                             <ComboBoxItem Content="按镜头" Tag="Lens"/>
+                            <ComboBoxItem Content="按评分" Tag="Rating"/>
                         </ComboBox>
 
                         <!--
@@ -299,8 +300,13 @@
                         <Button x:Name="ViewButton"
                                 Width="36" Height="32" Padding="0"
                                 Background="Transparent" BorderThickness="0"
-                                ToolTipService.ToolTip="展示方式">
-                            <FontIcon Glyph="&#xE71E;" FontSize="16"/>
+                                ToolTipService.ToolTip="展示方式（布局 + 缩略图大小）">
+                            <!--
+                              E890 = View（"看的方式"那个图标）。
+                              之前用的是 E71E，那是 Zoom —— 一枚放大镜，
+                              放在这里会让人以为点了是缩放，实际弹的是布局/大小菜单，对不上。
+                            -->
+                            <FontIcon Glyph="&#xE890;" FontSize="16"/>
                             <Button.Flyout>
                                 <Flyout>
                                     <StackPanel Spacing="12" Padding="4">
@@ -341,6 +347,87 @@
                                 </Flyout>
                             </Button.Flyout>
                         </Button>
+
+                        <!--
+                          排序：只管右侧这一屏的顺序，不动左边的分组。
+                          第一项"默认（跟随分类）"的意思是：按文件夹时按文件名排（和
+                          资源管理器一个顺序），按日期/相机/镜头时按拍摄时间倒序排 ——
+                          也就是加这个功能之前的行为。
+                        -->
+                        <Button x:Name="SortButton"
+                                Width="36" Height="32" Padding="0"
+                                Background="Transparent" BorderThickness="0"
+                                ToolTipService.ToolTip="排序方式">
+                            <!-- E8CB = Sort（三条横线带箭头） -->
+                            <FontIcon Glyph="&#xE8CB;" FontSize="16"/>
+                            <Button.Flyout>
+                                <Flyout>
+                                    <StackPanel Spacing="10" Padding="4" MinWidth="196">
+                                        <TextBlock Text="排序" FontSize="12"
+                                                   Foreground="#99FFFFFF"/>
+                                        <StackPanel Spacing="6">
+                                            <ToggleButton x:Name="SortDefaultToggle"
+                                                          Content="默认（跟随分类）"
+                                                          HorizontalAlignment="Stretch"
+                                                          HorizontalContentAlignment="Left"
+                                                          Checked="SortToggle_Checked"
+                                                          Unchecked="SortToggle_Unchecked"/>
+                                            <ToggleButton x:Name="SortNameAscToggle"
+                                                          Content="文件名　A → Z" Tag="FileNameAsc"
+                                                          HorizontalAlignment="Stretch"
+                                                          HorizontalContentAlignment="Left"
+                                                          Checked="SortToggle_Checked"
+                                                          Unchecked="SortToggle_Unchecked"/>
+                                            <ToggleButton x:Name="SortNameDescToggle"
+                                                          Content="文件名　Z → A" Tag="FileNameDesc"
+                                                          HorizontalAlignment="Stretch"
+                                                          HorizontalContentAlignment="Left"
+                                                          Checked="SortToggle_Checked"
+                                                          Unchecked="SortToggle_Unchecked"/>
+                                            <ToggleButton x:Name="SortDateDescToggle"
+                                                          Content="拍摄时间　新 → 旧" Tag="DateTakenDesc"
+                                                          HorizontalAlignment="Stretch"
+                                                          HorizontalContentAlignment="Left"
+                                                          Checked="SortToggle_Checked"
+                                                          Unchecked="SortToggle_Unchecked"/>
+                                            <ToggleButton x:Name="SortDateAscToggle"
+                                                          Content="拍摄时间　旧 → 新" Tag="DateTakenAsc"
+                                                          HorizontalAlignment="Stretch"
+                                                          HorizontalContentAlignment="Left"
+                                                          Checked="SortToggle_Checked"
+                                                          Unchecked="SortToggle_Unchecked"/>
+                                            <ToggleButton x:Name="SortSizeDescToggle"
+                                                          Content="文件大小　大 → 小" Tag="FileSizeDesc"
+                                                          HorizontalAlignment="Stretch"
+                                                          HorizontalContentAlignment="Left"
+                                                          Checked="SortToggle_Checked"
+                                                          Unchecked="SortToggle_Unchecked"/>
+                                        </StackPanel>
+                                        <TextBlock Text="按文件夹浏览时没有元数据可用，「拍摄时间」按文件的修改时间排。"
+                                                   FontSize="11" Foreground="#66FFFFFF"
+                                                   TextWrapping="Wrap"/>
+                                    </StackPanel>
+                                </Flyout>
+                            </Button.Flyout>
+                        </Button>
+
+                        <!--
+                          只看收藏：第一个"智能相册"。
+                          收藏只存在索引库里 —— 按文件夹直接扫盘那条路压根没这个概念，
+                          所以在那种模式下打开它会自动切到按日期（跟在搜索框里打字一样）。
+                        -->
+                        <ToggleButton x:Name="FavToggle"
+                                      Padding="10,5"
+                                      VerticalAlignment="Center"
+                                      ToolTipService.ToolTip="只看收藏的图"
+                                      Checked="FavToggle_Checked"
+                                      Unchecked="FavToggle_Unchecked">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <!-- E734 = FavoriteStar（空心星） -->
+                                <FontIcon x:Name="FavIcon" Glyph="&#xE734;" FontSize="13"/>
+                                <TextBlock Text="只看收藏" FontSize="12"/>
+                            </StackPanel>
+                        </ToggleButton>
 
                         <Button x:Name="OpenFolderButton"
                                 Click="OpenFolderButton_Click"

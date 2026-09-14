@@ -68,6 +68,13 @@ public sealed class MediaQuery
 
     public int? MinRating { get; init; }
     public MediaKind? Kind { get; init; }
+
+    /// <summary>只要收藏的（"智能相册 → 收藏"用）。</summary>
+    public bool FavoritesOnly { get; init; }
+
+    /// <summary>只要打了这个标签的。大小写不敏感。</summary>
+    public string? Tag { get; init; }
+
     public SortKey Sort { get; init; } = SortKey.DateTakenDesc;
 
     /// <summary>
@@ -93,6 +100,13 @@ public sealed class GroupEntry
 
     /// <summary>组里的第一张图，用来当这个组的封面。</summary>
     public string? CoverPath { get; init; }
+}
+
+/// <summary>左栏"标签"一节里的一行：标签名 + 有多少张。</summary>
+public sealed class TagEntry
+{
+    public string Tag { get; init; } = string.Empty;
+    public int Count { get; init; }
 }
 
 /// <summary>一次扫描的结果。</summary>
@@ -125,8 +139,13 @@ public sealed class IndexReport
 /// </summary>
 public sealed class MediaIndex : IDisposable
 {
-    /// <summary>当前表结构版本。改了建表语句就加一，旧库会自动重建。</summary>
-    private const int SchemaVersion = 2;
+    /// <summary>
+    /// 当前表结构版本。改了建表语句就加一。
+    ///
+    /// 注意 v3 之后**不能再靠删表重建来升版**了 —— 库里开始存用户数据
+    /// （评分 / 收藏 / 标签），删表等于把人家的评分悄悄清空。见 <see cref="MigrateFrom"/>。
+    /// </summary>
+    private const int SchemaVersion = 3;
 
     private readonly SqliteConnection _conn;
     private readonly object _gate = new();
@@ -166,61 +185,138 @@ public sealed class MediaIndex : IDisposable
     {
         lock (_gate)
         {
+            // WAL 这些是连接级设置，每次开库都要重设（它们不写进文件）
+            Exec("PRAGMA journal_mode=WAL;");
+            Exec("PRAGMA synchronous=NORMAL;");
+
             using var cmd = _conn.CreateCommand();
 
             // user_version 是 SQLite 自带的一个整数位，拿它当结构版本号正好
             cmd.CommandText = "PRAGMA user_version;";
             int version = Convert.ToInt32(cmd.ExecuteScalar() ?? 0);
 
-            if (version == SchemaVersion)
+            if (version == SchemaVersion) return;   // 已经是最新的，什么都不用做
+
+            if (version == 0)
             {
-                // 表已经是对的，但 WAL 这些连接级设置每次开库都要重设
-                Exec("PRAGMA journal_mode=WAL;");
-                Exec("PRAGMA synchronous=NORMAL;");
-                return;
+                CreateSchema();                     // 全新库
+            }
+            else if (version < SchemaVersion)
+            {
+                MigrateFrom(version);               // 老库升级（只加不删）
+            }
+            else
+            {
+                // 库是用比现在更新的版本写的（比如装回旧版）。
+                // 猜不出新版本长什么样，整库重建最稳 —— 正常情况下不会走到这里。
+                DropAll();
+                CreateSchema();
             }
 
-            // 版本对不上（旧库或坏库）：整库重建。
-            // 索引库是纯派生数据 —— 删了大不了重扫一遍，不值得为它写迁移代码。
-            Exec("DROP TABLE IF EXISTS Media;");
-            Exec("DROP TABLE IF EXISTS Meta;");
-
-            Exec(@"
-                CREATE TABLE Media (
-                    Path          TEXT    PRIMARY KEY,
-                    PathLower     TEXT    NOT NULL,
-                    Directory     TEXT    NOT NULL,
-                    FileName      TEXT    NOT NULL,
-                    Kind          INTEGER NOT NULL DEFAULT 0,
-                    FileSize      INTEGER NOT NULL DEFAULT 0,
-                    ModifiedTicks INTEGER NOT NULL DEFAULT 0,
-                    PixelWidth    INTEGER NOT NULL DEFAULT 0,
-                    PixelHeight   INTEGER NOT NULL DEFAULT 0,
-                    DateTaken     INTEGER NULL,
-                    DateEstimated INTEGER NOT NULL DEFAULT 0,
-                    CameraMake    TEXT    NULL,
-                    CameraModel   TEXT    NULL,
-                    LensModel     TEXT    NULL,
-                    FNumber       TEXT    NULL,
-                    ExposureTime  TEXT    NULL,
-                    IsoSpeed      TEXT    NULL,
-                    FocalLength   TEXT    NULL,
-                    Rating        INTEGER NOT NULL DEFAULT 0,
-                    IndexedAt     INTEGER NOT NULL DEFAULT 0
-                );");
-
-            // 按日期、按相机、按目录是界面上最常用的三种分法，给它们单独建索引。
-            // PathLower 是给"文件搬过家"时做不区分大小写的匹配用的。
-            Exec("CREATE INDEX IX_Media_DateTaken   ON Media(DateTaken);");
-            Exec("CREATE INDEX IX_Media_CameraModel ON Media(CameraModel);");
-            Exec("CREATE INDEX IX_Media_LensModel   ON Media(LensModel);");
-            Exec("CREATE INDEX IX_Media_Directory   ON Media(Directory);");
-            Exec("CREATE INDEX IX_Media_Rating      ON Media(Rating);");
-
             Exec($"PRAGMA user_version = {SchemaVersion};");
-            Exec("PRAGMA journal_mode=WAL;");
-            Exec("PRAGMA synchronous=NORMAL;");
         }
+    }
+
+    private void CreateSchema()
+    {
+        Exec(@"
+            CREATE TABLE IF NOT EXISTS Media (
+                Path          TEXT    PRIMARY KEY,
+                PathLower     TEXT    NOT NULL,
+                Directory     TEXT    NOT NULL,
+                FileName      TEXT    NOT NULL,
+                Kind          INTEGER NOT NULL DEFAULT 0,
+                FileSize      INTEGER NOT NULL DEFAULT 0,
+                ModifiedTicks INTEGER NOT NULL DEFAULT 0,
+                PixelWidth    INTEGER NOT NULL DEFAULT 0,
+                PixelHeight   INTEGER NOT NULL DEFAULT 0,
+                DateTaken     INTEGER NULL,
+                DateEstimated INTEGER NOT NULL DEFAULT 0,
+                CameraMake    TEXT    NULL,
+                CameraModel   TEXT    NULL,
+                LensModel     TEXT    NULL,
+                FNumber       TEXT    NULL,
+                ExposureTime  TEXT    NULL,
+                IsoSpeed      TEXT    NULL,
+                FocalLength   TEXT    NULL,
+                Rating        INTEGER NOT NULL DEFAULT 0,
+                Favorite      INTEGER NOT NULL DEFAULT 0,
+                IndexedAt     INTEGER NOT NULL DEFAULT 0
+            );");
+
+        // 按日期、按相机、按目录是界面上最常用的三种分法，给它们单独建索引。
+        // PathLower 是给"文件搬过家"时做不区分大小写的匹配用的。
+        Exec("CREATE INDEX IF NOT EXISTS IX_Media_DateTaken   ON Media(DateTaken);");
+        Exec("CREATE INDEX IF NOT EXISTS IX_Media_CameraModel ON Media(CameraModel);");
+        Exec("CREATE INDEX IF NOT EXISTS IX_Media_LensModel   ON Media(LensModel);");
+        Exec("CREATE INDEX IF NOT EXISTS IX_Media_Directory   ON Media(Directory);");
+        Exec("CREATE INDEX IF NOT EXISTS IX_Media_Rating      ON Media(Rating);");
+        Exec("CREATE INDEX IF NOT EXISTS IX_Media_Favorite    ON Media(Favorite);");
+
+        CreateTagsTable();
+    }
+
+    private void CreateTagsTable()
+    {
+        // 标签单独一张表，而不是在 Media 上开一个逗号分隔的文本列：
+        // 文本列要统计"每个标签各有多少张"就得全表 LIKE 扫一遍，
+        // 标签一多（几百个）左栏每次刷新都要卡一下。
+        //
+        // TagLower 是给"大小写不同算同一个标签"用的（"旅行" 和 "Travel"
+        // 当然是两个标签，但 "Travel" 和 "travel" 不该是两个）。
+        Exec(@"
+            CREATE TABLE IF NOT EXISTS Tags (
+                Path     TEXT NOT NULL,
+                Tag      TEXT NOT NULL,
+                TagLower TEXT NOT NULL,
+                PRIMARY KEY (Path, TagLower)
+            );");
+        Exec("CREATE INDEX IF NOT EXISTS IX_Tags_TagLower ON Tags(TagLower);");
+    }
+
+    private void DropAll()
+    {
+        Exec("DROP TABLE IF EXISTS Media;");
+        Exec("DROP TABLE IF EXISTS Tags;");
+        Exec("DROP TABLE IF EXISTS Meta;");   // 早期版本留的空表
+    }
+
+    /// <summary>
+    /// 老库升级。
+    ///
+    /// 这里必须**真的迁移**，不能像以前那样直接删表重建。
+    /// 原因：从 v3 开始库里存了评分 / 收藏 / 标签 —— 那是用户一张张点出来的，
+    /// 不是重扫一遍磁盘就能回来的东西（索引里的尺寸、EXIF 才是）。
+    /// 升个级就把人家的评分清空，这种事发生一次就没人敢用第二次了。
+    /// </summary>
+    private void MigrateFrom(int from)
+    {
+        // 2 → 3：加"收藏"列 + 标签表。（1 → 2 那版没对外发过，不用管）
+        if (from < 3)
+        {
+            // ALTER TABLE 没有 IF NOT EXISTS，重复加列会报错，所以先问一句
+            if (!ColumnExists("Media", "Favorite"))
+                Exec("ALTER TABLE Media ADD COLUMN Favorite INTEGER NOT NULL DEFAULT 0;");
+
+            CreateTagsTable();
+        }
+    }
+
+    private bool ColumnExists(string table, string column)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = $"PRAGMA table_info({table});";
+
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            // table_info 的第 2 列是列名
+            if (!r.IsDBNull(1) &&
+                string.Equals(r.GetString(1), column, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
     }
 
     private void Exec(string sql)
@@ -274,7 +370,13 @@ public sealed class MediaIndex : IDisposable
     /// 不读磁盘、不读 EXIF —— 调用方先把 <see cref="PhotoInfo"/> 准备好。
     /// 这样索引逻辑和"怎么读一张图"是分开的，将来换探测方式不用动这里。
     /// </summary>
-    public void Upsert(PhotoInfo info, MediaKind kind = MediaKind.Image, int rating = 0)
+    /// <param name="rating">
+    /// 评分。**传 null（默认）= 保留库里原来的值**，不是清零。
+    /// 这一点很关键：整理图库时每张图都会走一遍这里，
+    /// 如果默认清零，用户辛苦打的分每整理一次就没一次。
+    /// 回归测试 F 段专门盯着这条。
+    /// </param>
+    public void Upsert(PhotoInfo info, MediaKind kind = MediaKind.Image, int? rating = null)
     {
         if (string.IsNullOrEmpty(info.Path)) return;
 
@@ -293,7 +395,9 @@ public sealed class MediaIndex : IDisposable
                     $size, $ticks, $w, $h,
                     $date, $est, $make, $model, $lens,
                     $fnum, $exp, $iso, $focal,
-                    $rating, $now)
+                    COALESCE($rating, 0), $now)
+                -- 注意：下面 DO UPDATE 里**故意不写 Favorite**。
+                -- 文件重扫一遍不该把用户标的收藏冲掉，不写就等于保留原值。
                 ON CONFLICT(Path) DO UPDATE SET
                     PathLower     = excluded.PathLower,
                     Directory     = excluded.Directory,
@@ -312,7 +416,9 @@ public sealed class MediaIndex : IDisposable
                     ExposureTime  = excluded.ExposureTime,
                     IsoSpeed      = excluded.IsoSpeed,
                     FocalLength   = excluded.FocalLength,
-                    Rating        = excluded.Rating,
+                    -- 没传评分就保留原来的（COALESCE 的第二个 Rating 指更新前的那一行）。
+                    -- 写死成 excluded.Rating 的话，整理一次图库评分就全清零了。
+                    Rating        = COALESCE($rating, Rating),
                     IndexedAt     = excluded.IndexedAt;";
 
             string dir = string.Empty;
@@ -339,7 +445,7 @@ public sealed class MediaIndex : IDisposable
             cmd.Parameters.AddWithValue("$exp", (object?)info.ExposureTime ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$iso", (object?)info.IsoSpeed ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$focal", (object?)info.FocalLength ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("$rating", rating);
+            cmd.Parameters.AddWithValue("$rating", (object?)rating ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
 
             cmd.ExecuteNonQuery();
@@ -380,6 +486,13 @@ public sealed class MediaIndex : IDisposable
             cmd.CommandText = "DELETE FROM Media WHERE Path = $p;";
             cmd.Parameters.AddWithValue("$p", path);
             cmd.ExecuteNonQuery();
+
+            // 标签跟着一起删，否则会攒下一堆"指向不存在的文件"的孤儿标签，
+            // 左栏的标签列表里就会出现删不掉的幽灵标签
+            using var tag = _conn.CreateCommand();
+            tag.CommandText = "DELETE FROM Tags WHERE Path = $p;";
+            tag.Parameters.AddWithValue("$p", path);
+            tag.ExecuteNonQuery();
         }
     }
 
@@ -430,6 +543,11 @@ public sealed class MediaIndex : IDisposable
                     del.CommandText = "DELETE FROM Media WHERE Path = $p;";
                     del.Parameters.AddWithValue("$p", p);
                     removed += del.ExecuteNonQuery();
+
+                    using var delTag = _conn.CreateCommand();
+                    delTag.CommandText = "DELETE FROM Tags WHERE Path = $p;";
+                    delTag.Parameters.AddWithValue("$p", p);
+                    delTag.ExecuteNonQuery();
                 }
                 tx.Commit();
             }
@@ -438,10 +556,19 @@ public sealed class MediaIndex : IDisposable
         return removed;
     }
 
-    /// <summary>清空整个索引。</summary>
+    /// <summary>
+    /// 清空整个索引。
+    ///
+    /// 注意它连评分 / 收藏 / 标签一起清 —— 这些是用户数据，
+    /// 所以界面上"整理图库"走的是增量扫描，不会调到这里。
+    /// </summary>
     public void Clear()
     {
-        lock (_gate) Exec("DELETE FROM Media;");
+        lock (_gate)
+        {
+            Exec("DELETE FROM Media;");
+            Exec("DELETE FROM Tags;");
+        }
     }
 
     public int Count
@@ -456,6 +583,183 @@ public sealed class MediaIndex : IDisposable
             }
         }
     }
+
+    // ==================== 评分 / 收藏 / 标签 ====================
+    //
+    // 这三个和上面那些字段有本质区别：**它们是用户数据，不是派生数据**。
+    // 尺寸、EXIF、拍摄时间丢了重扫一遍就有；
+    // 用户一张张点出来的评分丢一次，他就不会再用第二次。
+    //
+    // 由此推出两条硬规矩，改这块代码时别破：
+    //   1. 升表结构只能 ALTER 加列，绝不能删表重建（见 MigrateFrom）
+    //   2. Upsert 的 ON CONFLICT DO UPDATE 里**故意不碰** Favorite，
+    //      Tags 也不在那条语句里 —— 图被改动后重扫一遍，
+    //      不该顺手把用户标的收藏冲掉
+
+    /// <summary>设评分。0 = 未评分，1~5 = 星级。超出范围会被夹住。</summary>
+    public void SetRating(string path, int rating)
+    {
+        rating = Math.Clamp(rating, 0, 5);
+
+        lock (_gate)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "UPDATE Media SET Rating = $r WHERE Path = $p;";
+            cmd.Parameters.AddWithValue("$r", rating);
+            cmd.Parameters.AddWithValue("$p", path);
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>读评分。库里没这张图就当未评分。</summary>
+    public int GetRating(string path) => QueryInt("Rating", path);
+
+    /// <summary>收藏 / 取消收藏。</summary>
+    public void SetFavorite(string path, bool on)
+    {
+        lock (_gate)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "UPDATE Media SET Favorite = $f WHERE Path = $p;";
+            cmd.Parameters.AddWithValue("$f", on ? 1 : 0);
+            cmd.Parameters.AddWithValue("$p", path);
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    public bool IsFavorite(string path) => QueryInt("Favorite", path) == 1;
+
+    /// <summary>取单个整数列的小工具（评分、收藏都是这种）。</summary>
+    private int QueryInt(string column, string path)
+    {
+        lock (_gate)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = $"SELECT {column} FROM Media WHERE Path = $p;";
+            cmd.Parameters.AddWithValue("$p", path);
+
+            object? v = cmd.ExecuteScalar();
+            return v is null or DBNull ? 0 : Convert.ToInt32(v);
+        }
+    }
+
+    /// <summary>整批替换这张图的标签（传空集合 = 清空）。</summary>
+    public void SetTags(string path, IEnumerable<string> tags)
+    {
+        lock (_gate)
+        {
+            using var tx = _conn.BeginTransaction();
+
+            using (var del = _conn.CreateCommand())
+            {
+                del.CommandText = "DELETE FROM Tags WHERE Path = $p;";
+                del.Parameters.AddWithValue("$p", path);
+                del.ExecuteNonQuery();
+            }
+
+            foreach (string t in tags) InsertTag(path, t);
+
+            tx.Commit();
+        }
+    }
+
+    /// <summary>加一个标签。已经有就不重复加。</summary>
+    public void AddTag(string path, string tag)
+    {
+        lock (_gate) InsertTag(path, tag);
+    }
+
+    /// <summary>去掉一个标签。没有这个标签也不报错。</summary>
+    public void RemoveTag(string path, string tag)
+    {
+        string t = NormalizeTag(tag);
+        if (t.Length == 0) return;
+
+        lock (_gate)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "DELETE FROM Tags WHERE Path = $p AND TagLower = $l;";
+            cmd.Parameters.AddWithValue("$p", path);
+            cmd.Parameters.AddWithValue("$l", t.ToLowerInvariant());
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>这张图上的标签，按名字排好。</summary>
+    public List<string> GetTags(string path)
+    {
+        var list = new List<string>();
+
+        lock (_gate)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT Tag FROM Tags WHERE Path = $p ORDER BY Tag;";
+            cmd.Parameters.AddWithValue("$p", path);
+
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) list.Add(r.GetString(0));
+        }
+
+        return list;
+    }
+
+    /// <summary>
+    /// 全库用过的标签，带"各有多少张"，按张数从多到少排。
+    /// 左栏的"标签"那一节就靠它。
+    /// </summary>
+    public List<TagEntry> AllTags()
+    {
+        var list = new List<TagEntry>();
+
+        lock (_gate)
+        {
+            using var cmd = _conn.CreateCommand();
+
+            // 只统计"还存在的图"上的标签：图删了以后它的标签会变成孤儿，
+            // 不 JOIN 一下的话左栏会冒出删不掉的幽灵标签
+            cmd.CommandText = @"
+                SELECT t.Tag, COUNT(*)
+                FROM Tags t
+                INNER JOIN Media m ON m.Path = t.Path
+                GROUP BY t.TagLower
+                ORDER BY COUNT(*) DESC, t.Tag ASC;";
+
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+                list.Add(new TagEntry { Tag = r.GetString(0), Count = r.GetInt32(1) });
+        }
+
+        return list;
+    }
+
+    /// <summary>收藏了多少张（左栏"收藏"那一节显示数量用）。</summary>
+    public int CountFavorites()
+    {
+        lock (_gate)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM Media WHERE Favorite = 1;";
+            return Convert.ToInt32(cmd.ExecuteScalar() ?? 0);
+        }
+    }
+
+    private void InsertTag(string path, string tag)
+    {
+        string t = NormalizeTag(tag);
+        if (t.Length == 0) return;
+
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = @"
+            INSERT INTO Tags (Path, Tag, TagLower) VALUES ($p, $t, $l)
+            ON CONFLICT(Path, TagLower) DO NOTHING;";
+        cmd.Parameters.AddWithValue("$p", path);
+        cmd.Parameters.AddWithValue("$t", t);
+        cmd.Parameters.AddWithValue("$l", t.ToLowerInvariant());
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>标签名规范化：去首尾空白。空的直接丢掉，不进库。</summary>
+    private static string NormalizeTag(string tag) => (tag ?? string.Empty).Trim();
 
     // ===== 扫描 =====
 
@@ -603,6 +907,16 @@ public sealed class MediaIndex : IDisposable
                 cmd.Parameters.AddWithValue("$r", q.MinRating.Value);
             }
 
+            if (q.FavoritesOnly)
+                where.Add("Favorite = 1");
+
+            if (!string.IsNullOrWhiteSpace(q.Tag))
+            {
+                // 用 EXISTS 而不是 JOIN：JOIN 会让同一张图因为有多个标签而重复出现
+                where.Add("EXISTS (SELECT 1 FROM Tags t WHERE t.Path = Media.Path AND t.TagLower = $tag)");
+                cmd.Parameters.AddWithValue("$tag", q.Tag!.Trim().ToLowerInvariant());
+            }
+
             if (q.Kind.HasValue)
             {
                 where.Add("Kind = $k");
@@ -660,6 +974,17 @@ public sealed class MediaIndex : IDisposable
             {
                 where.Add("Kind = $k");
                 cmd.Parameters.AddWithValue("$k", (int)filter.Kind.Value);
+            }
+
+            // 和 Query() 用同一套筛选条件，
+            // 否则"收藏"里显示的张数和点进去看到的对不上
+            if (filter.FavoritesOnly)
+                where.Add("Favorite = 1");
+
+            if (!string.IsNullOrWhiteSpace(filter.Tag))
+            {
+                where.Add("EXISTS (SELECT 1 FROM Tags t WHERE t.Path = Media.Path AND t.TagLower = $tag)");
+                cmd.Parameters.AddWithValue("$tag", filter.Tag!.Trim().ToLowerInvariant());
             }
 
             string expr = GroupExpression(by);

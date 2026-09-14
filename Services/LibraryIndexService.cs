@@ -163,6 +163,94 @@ public sealed class LibraryIndexService
     /// 两条路径给出的顺序不一样，用户切换分类时会觉得"图的顺序乱了"。
     /// 索引查出来的条数最多两万，内存重排几毫秒的事，不值得为此在 SQL 里造轮子。
     /// </summary>
+    // ===== 评分 / 收藏 / 标签 =====
+    //
+    // 这三个都是**用户数据**：图库重扫一遍不能把它们弄丢。
+    // MediaIndex 那边已经保证了（Upsert 默认不动评分、升表结构只加列），
+    // 这一层只负责"索引不可用时别崩"—— 索引打不开时全部返回默认值，
+    // 宁可暂时用不了，也不能让右键菜单弹个异常出来。
+
+    public int RatingOf(string path)
+    {
+        try { return Index?.GetRating(path) ?? 0; }
+        catch (Exception ex) { StartupLog.Write("LibraryIndexService: 读评分失败", ex); return 0; }
+    }
+
+    public void SetRating(string path, int rating)
+    {
+        try { Index?.SetRating(path, rating); }
+        catch (Exception ex) { StartupLog.Write("LibraryIndexService: 写评分失败", ex); }
+    }
+
+    public bool IsFavorite(string path)
+    {
+        try { return Index?.IsFavorite(path) ?? false; }
+        catch (Exception ex) { StartupLog.Write("LibraryIndexService: 读收藏失败", ex); return false; }
+    }
+
+    /// <summary>切换收藏，返回切换之后的状态（菜单文案要用）。</summary>
+    public bool ToggleFavorite(string path)
+    {
+        try
+        {
+            var index = Index;
+            if (index is null) return false;
+
+            bool on = !index.IsFavorite(path);
+            index.SetFavorite(path, on);
+            return on;
+        }
+        catch (Exception ex)
+        {
+            StartupLog.Write("LibraryIndexService: 写收藏失败", ex);
+            return false;
+        }
+    }
+
+    public int CountFavorites()
+    {
+        try { return Index?.CountFavorites() ?? 0; }
+        catch (Exception ex) { StartupLog.Write("LibraryIndexService: 统计收藏失败", ex); return 0; }
+    }
+
+    public List<string> GetTags(string path)
+    {
+        try { return Index?.GetTags(path) ?? new List<string>(); }
+        catch (Exception ex) { StartupLog.Write("LibraryIndexService: 读标签失败", ex); return new List<string>(); }
+    }
+
+    /// <summary>整批替换标签。输入可以是"旅行, 家人"这种一行字，也可以是一个列表。</summary>
+    public void SetTags(string path, IEnumerable<string> tags)
+    {
+        try { Index?.SetTags(path, tags); }
+        catch (Exception ex) { StartupLog.Write("LibraryIndexService: 写标签失败", ex); }
+    }
+
+    public List<TagEntry> AllTags()
+    {
+        try { return Index?.AllTags() ?? new List<TagEntry>(); }
+        catch (Exception ex) { StartupLog.Write("LibraryIndexService: 列标签失败", ex); return new List<TagEntry>(); }
+    }
+
+    /// <summary>
+    /// 把"旅行, 家人" / "旅行 家人" / "旅行；家人" 这种一行输入拆成标签列表。
+    /// 用户不会乖乖只用一个分隔符，逗号空格分号全都会混着来。
+    /// </summary>
+    public static List<string> ParseTags(string? text)
+    {
+        var list = new List<string>();
+        if (string.IsNullOrWhiteSpace(text)) return list;
+
+        foreach (string part in text!.Split(new[] { ',', '，', ';', '；', '\n', '\r' },
+                                            StringSplitOptions.RemoveEmptyEntries))
+        {
+            string t = part.Trim();
+            if (t.Length > 0 && !list.Contains(t, StringComparer.OrdinalIgnoreCase)) list.Add(t);
+        }
+
+        return list;
+    }
+
     public static List<string> SortNatural(IEnumerable<string> paths, bool descending = false)
     {
         var list = paths.ToList();
