@@ -53,6 +53,7 @@
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>   <!-- 包含子文件夹 -->
+                        <RowDefinition Height="Auto"/>   <!-- 分类维度 + 搜索 -->
                         <RowDefinition Height="Auto"/>   <!-- 「图库」标题 -->
                         <RowDefinition Height="*"/>      <!-- 目录树 -->
                         <RowDefinition Height="Auto"/>   <!-- 关于 -->
@@ -72,7 +73,8 @@
                       跟它作用的目录树挨得越近越好懂；最下面留给"关于"这种
                       跟看图无关的东西。
                     -->
-                    <Border Grid.Row="0"
+                    <Border x:Name="IncludeSubRow"
+                            Grid.Row="0"
                             Background="#FF171717"
                             BorderBrush="#1AFFFFFF"
                             BorderThickness="0,0,0,1"
@@ -86,18 +88,75 @@
                                       ToolTipService.ToolTip="把当前文件夹下面所有子文件夹里的图片也一起铺出来"/>
                     </Border>
 
-                    <Grid Grid.Row="1" Margin="16,10,10,4">
-                        <TextBlock Text="图库" FontSize="14" Foreground="#8CFFFFFF"
+                    <!--
+                      分类维度 + 搜索。
+
+                      这一排是"图库管理"和"单纯看图"的分界线：
+                      以前左树只能按文件夹分，想按日期/相机找图只能靠记路径。
+                      现在换维度只换树的内容 —— 外壳、右键菜单、多选全都不用动，
+                      以后加"标签""智能相册"也只是往这个 ComboBox 里多塞一项。
+
+                      判据放在 Tag 上而不是按顺序取 SelectedIndex：
+                      以后调整选项顺序、或者临时隐藏某一项，都不会把分类串位。
+                    -->
+                    <StackPanel Grid.Row="1" Margin="10,9,10,2" Spacing="7">
+                        <ComboBox x:Name="GroupCombo"
+                                  HorizontalAlignment="Stretch"
+                                  FontSize="12.5"
+                                  SelectionChanged="GroupCombo_SelectionChanged"
+                                  ToolTipService.ToolTip="左侧这棵树按什么来分。按日期时，照片用拍摄时间，没有拍摄时间的（截图、聊天里的图）用文件修改时间。">
+                            <ComboBoxItem Content="按文件夹" Tag="Folder" IsSelected="True"/>
+                            <ComboBoxItem Content="按日期" Tag="Date"/>
+                            <ComboBoxItem Content="按相机" Tag="Camera"/>
+                            <ComboBoxItem Content="按镜头" Tag="Lens"/>
+                        </ComboBox>
+
+                        <!--
+                          不给 ItemsSource，所以它不会弹建议列表，就是个带搜索图标
+                          和清除按钮的输入框（比 TextBox 省得自己画这两个东西）。
+                        -->
+                        <!--
+                          用 AutoSuggestBox 而不是 TextBox：白送一个放大镜图标和
+                          一键清除的 ×，不用自己画。不给 ItemsSource 就不会弹建议列表，
+                          在这里它只是个长得像搜索框的输入框。
+                          注意别写 QueryIcon="Find" —— WinUI3 里它是 IconElement，
+                          塞字符串会让 XamlCompiler 内部空引用崩（报错落在 .targets 上，
+                          看不出是这一行的锅），默认的放大镜本来就是 Find。
+                        -->
+                        <AutoSuggestBox x:Name="SearchBox"
+                                        PlaceholderText="搜索文件名 / 相机 / 镜头"
+                                        FontSize="12.5"
+                                        TextChanged="SearchBox_TextChanged"
+                                        QuerySubmitted="SearchBox_QuerySubmitted"/>
+                    </StackPanel>
+
+                    <Grid Grid.Row="2" Margin="16,10,10,4">
+                        <TextBlock x:Name="TreeTitle" Text="图库" FontSize="14" Foreground="#8CFFFFFF"
                                    VerticalAlignment="Center"/>
-                                <Button x:Name="AddFolderButton"
-                                        HorizontalAlignment="Right"
-                                        Click="AddFolderButton_Click"
-                                        Width="30" Height="30" Padding="0"
-                                        Background="Transparent" BorderThickness="0"
-                                        ToolTipService.ToolTip="添加文件夹到图库">
-                            <!-- E710 = Add -->
-                            <FontIcon Glyph="&#xE710;" FontSize="17"/>
-                        </Button>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="0">
+                            <!--
+                              "整理图库"：把图库里的目录收进索引库。
+                              只有按日期/相机分类、或者用了搜索时才需要它 ——
+                              按文件夹浏览是直接读磁盘的，压根不碰索引。
+                              索引是增量的，整理过一次以后再点基本是秒完成。
+                            -->
+                            <Button x:Name="IndexButton"
+                                    Click="IndexButton_Click"
+                                    Width="30" Height="30" Padding="0"
+                                    Background="Transparent" BorderThickness="0"
+                                    ToolTipService.ToolTip="整理图库（建立日期 / 相机 / 搜索所需的索引）">
+                                <!-- E72C = Refresh -->
+                                <FontIcon Glyph="&#xE72C;" FontSize="15"/>
+                            </Button>
+                            <Button x:Name="AddFolderButton"
+                                    Click="AddFolderButton_Click"
+                                    Width="30" Height="30" Padding="0"
+                                    Background="Transparent" BorderThickness="0"
+                                    ToolTipService.ToolTip="添加文件夹到图库">
+                                <!-- E710 = Add -->
+                                <FontIcon Glyph="&#xE710;" FontSize="17"/>
+                            </Button>
+                        </StackPanel>
                     </Grid>
 
                     <!--
@@ -106,7 +165,7 @@
                       子目录仍然是懒展开，展开哪个读哪个。
                     -->
                     <TreeView x:Name="FolderTree"
-                              Grid.Row="2"
+                              Grid.Row="3"
                               SelectionMode="Single"
                               Expanding="FolderTree_Expanding"
                               ItemInvoked="FolderTree_ItemInvoked"
@@ -123,7 +182,8 @@
                                             Loaded="FolderNode_Loaded"
                                             ContextRequested="FolderNode_ContextRequested"
                                             ToolTipService.ToolTip="{Binding Content.Path}">
-                                    <FontIcon Glyph="&#xE8B7;" FontSize="18" Foreground="#B4FFFFFF"/>
+                                    <FontIcon Glyph="{Binding Content.Glyph}" FontSize="18"
+                                              Foreground="#B4FFFFFF"/>
                                     <!--  DataContext 是 TreeViewNode，Content 是 FolderNode  -->
                                     <TextBlock Text="{Binding Content.Label}" FontSize="14"
                                                Foreground="#E2E2E2" TextTrimming="CharacterEllipsis"/>
@@ -137,7 +197,7 @@
                       两个都点一下弹一个小窗口，属于"偶尔看一眼/设一次"的东西，
                       放在最底部是想让它们安分待着 —— 不该和看图的操作混在一起。
                     -->
-                    <Border Grid.Row="3"
+                    <Border Grid.Row="4"
                             Background="#FF171717"
                             BorderBrush="#1AFFFFFF"
                             BorderThickness="0,1,0,0"

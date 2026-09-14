@@ -25,5 +25,12 @@ public sealed class FolderNode
     /// <summary>是不是"图库"根节点（没有路径、只当一个分组标题）。</summary>
     public bool IsRoot => Path.Length == 0;
 
+    /// <summary>
+    /// 树上这一行的图标。
+    /// 名字和 <see cref="GroupNode.Glyph"/> 一致 —— 两种条目共用同一个
+    /// DataTemplate，模板按名字取值，名字对不上图标就不显示。
+    /// </summary>
+    public string Glyph => "\uE8B7";
+
     public override string ToString() => Label;
 }

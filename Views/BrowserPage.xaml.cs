@@ -76,6 +76,35 @@ public sealed partial class BrowserPage : Page
     private ThumbnailItem? _selected;
     private string? _currentFolder;
 
+    // ===== 分类与搜索 =====
+
+    /// <summary>
+    /// 左侧树当前按什么分。默认"按文件夹" —— 也就是**以前唯一的那一种**，
+    /// 而且按文件夹时走的还是原来那条直接读磁盘的路，
+    /// 所以用户不主动换分类，行为和加这个功能之前一模一样。
+    /// </summary>
+    private GroupBy _groupBy = GroupBy.Folder;
+
+    /// <summary>
+    /// 当前选中的分组值（"2026-09" / "Canon EOS R6"）。null = 没选 = 全部。
+    ///
+    /// 注意"没选"和"空串"是两回事：空串代表"无日期""未知相机"那一组，
+    /// 点它应该筛出那批图，而不是什么都不筛。
+    /// </summary>
+    private string? _groupValue;
+
+    private string _searchText = string.Empty;
+    private DispatcherQueueTimer? _searchDebounce;
+
+    /// <summary>
+    /// 是不是走在"查索引"这条路上。
+    ///
+    /// 只有按日期/相机/镜头分，或者搜索框里有字时才为 true；
+    /// 按文件夹空搜索时照旧直接读磁盘 —— 那条路不用等索引、不会被索引影响。
+    /// </summary>
+    private bool IndexMode => _groupBy != GroupBy.Folder
+                              || !string.IsNullOrWhiteSpace(_searchText);
+
     /// <summary>是否处于多选模式（工具栏"选择"按钮或右键"选择多项"进入）。</summary>
     private bool _multiSelect;
 
@@ -145,7 +174,7 @@ public sealed partial class BrowserPage : Page
         StartupLog.Write("BrowserPage: OnLoaded");
 
         App.Instance?.SetCustomTitleBar(TitleBar);
-        BuildLibraryTree();
+        BuildTree();
         Focus(FocusState.Programmatic);
 
         // 恢复上次用的缩略图大小。放在这里而不是构造函数里，
@@ -212,7 +241,21 @@ public sealed partial class BrowserPage : Page
     // ===== 图库（左侧目录树） =====
 
     /// <summary>
-    /// 重建左侧树。
+    /// 重建左侧树。按当前分类维度分派：
+    /// 文件夹维度走 <see cref="BuildFolderTree"/>（读磁盘），
+    /// 其它维度走 <see cref="BuildGroupTree"/>（查索引）。
+    ///
+    /// 之所以要做成两个而不是一个里 if 一下：两者的节点类型、数据来源、
+    /// 右键菜单完全不是一回事，混在一段里会变成谁都看不懂的分支。
+    /// </summary>
+    private void BuildTree()
+    {
+        if (IndexMode) BuildGroupTree();
+        else BuildFolderTree();
+    }
+
+    /// <summary>
+    /// 按文件夹重建（这条就是以前的全部内容，没改过行为）。
     ///
     /// 结构：根节点是"图库"，下面挂用户收进来的文件夹；每个文件夹再展开就是它的子目录。
     ///
@@ -220,7 +263,7 @@ public sealed partial class BrowserPage : Page
     /// 以前这里写死"桌面/图片/下载"三个根 —— 那样放别处的照片只能靠工具条上的按钮，
     /// 而且访问过的目录不会被记住，用户反过来问"为什么打开过的不在图库里"。
     /// </summary>
-    private void BuildLibraryTree()
+    private void BuildFolderTree()
     {
         FolderTree.RootNodes.Clear();
         _libraryNodes.Clear();
@@ -257,6 +300,176 @@ public sealed partial class BrowserPage : Page
         // 重建之后把选中态挪回"当前正在看的目录"（没在看的就选第一个），
         // 否则重建会把选中高亮弄丢
         SelectTreeNodeForCurrentFolder();
+    }
+
+    /// <summary>
+    /// 按当前维度重建左侧树（查索引，不读磁盘）。
+    ///
+    /// 结构：根是"全部"，下面一行一个组。点"全部"等于不筛，
+    /// 点某个组就把右侧墙限定到那一组里。
+    ///
+    /// 索引还是空的时候这里会建出一棵只有一个"全部（0）"的树 ——
+    /// 那不是 bug，是还没整理过图库。调用方负责先跑一遍整理，见
+    /// <see cref="SwitchToIndexModeAsync"/>。
+    /// </summary>
+    private void BuildGroupTree()
+    {
+        FolderTree.RootNodes.Clear();
+        _libraryNodes.Clear();
+
+        string glyph = _groupBy switch
+        {
+            // E787 = 日历，E722 = 相机
+            GroupBy.Date => "\uE787",
+            GroupBy.Camera => "\uE722",
+            GroupBy.Lens => "\uE722",
+            _ => "\uE8B7",
+        };
+
+        var groups = LibraryIndexService.Shared.Group(_groupBy, FilterWithoutGroup());
+        int total = groups.Sum(g => g.Count);
+
+        var all = new TreeViewNode
+        {
+            Content = new GroupNode
+            {
+                Key = string.Empty,
+                Label = $"全部　{total}",
+                Count = total,
+                IsAll = true,
+                Glyph = glyph,
+            },
+        };
+        all.IsExpanded = true;
+        FolderTree.RootNodes.Add(all);
+
+        foreach (GroupEntry g in groups)
+        {
+            all.Children.Add(new TreeViewNode
+            {
+                Content = new GroupNode
+                {
+                    Key = g.Key,
+                    Label = $"{g.Label}　{g.Count}",
+                    Count = g.Count,
+                    Glyph = glyph,
+                },
+            });
+        }
+
+        // 选中态挪回当前分组（没选就落在"全部"上），否则重建会把高亮弄丢
+        TreeViewNode? pick = all;
+        if (_groupValue is not null)
+        {
+            foreach (TreeViewNode child in all.Children)
+            {
+                if (child.Content is GroupNode gn && gn.Key == _groupValue) { pick = child; break; }
+            }
+        }
+
+        FolderTree.SelectedNode = pick;
+
+        StartupLog.Write($"BrowserPage: 分组树 {_groupBy} → {groups.Count} 组 / 共 {total} 张");
+    }
+
+    /// <summary>给"分组"用的查询条件：带搜索词，但不带分组值（分组时不能用自己筛自己）。</summary>
+    private MediaQuery FilterWithoutGroup() => new()
+    {
+        Text = string.IsNullOrWhiteSpace(_searchText) ? null : _searchText,
+    };
+
+    /// <summary>给"右侧墙"用的查询条件。</summary>
+    private MediaQuery CurrentQuery() => new()
+    {
+        Text = string.IsNullOrWhiteSpace(_searchText) ? null : _searchText,
+        Group = _groupBy,
+        GroupValue = _groupValue,
+        // 按文件夹时保持"跟资源管理器一样的名字顺序"，其余维度按拍摄时间倒序更实用
+        Sort = _groupBy == GroupBy.Folder ? SortKey.FileNameAsc : SortKey.DateTakenDesc,
+    };
+
+    /// <summary>
+    /// 从索引查一批路径铺到墙上（分类模式 / 搜索模式走这条路）。
+    /// </summary>
+    private async Task LoadFromIndexAsync()
+    {
+        int seq = ++_loadSeq;
+
+        var q = CurrentQuery();
+
+        // 查库是同步的 SQLite 调用，几千条也就几毫秒，但为了不挡 UI 还是挪到后台
+        List<string> paths = await Task.Run(() => LibraryIndexService.Shared.Query(q));
+
+        if (seq != _loadSeq) return;
+
+        // 文件名序要和"直接读磁盘"那条路对齐（自然序）：
+        // SQLite 排名字是字典序，IMG_10 会排在 IMG_2 前面，切个分类就觉得顺序乱了
+        if (q.Sort == SortKey.FileNameAsc || q.Sort == SortKey.FileNameDesc)
+            paths = LibraryIndexService.SortNatural(paths, q.Sort == SortKey.FileNameDesc);
+
+        string heading = DescribeCurrentView();
+
+        PathText.Text = heading;
+        TitleText.Text = !string.IsNullOrWhiteSpace(_searchText) ? _searchText : DescribeGroupLabel();
+        TitleDot.Visibility = Visibility.Visible;
+
+        if (paths.Count == 0)
+        {
+            // 必须先把墙清空再显示空状态：
+            // 否则"搜不到"的时候上一屏的图还挂在那儿，看着像搜出来了结果
+            _items = new ObservableCollection<ThumbnailItem>();
+            Thumbs.ItemsSource = _items;
+
+            ShowEmpty(string.IsNullOrWhiteSpace(_searchText)
+                ? "这一类里还没有图"
+                : $"没有匹配「{_searchText}」的图");
+            return;
+        }
+
+        var files = new List<(string Path, string? Sub)>(paths.Count);
+
+        foreach (string p in paths)
+        {
+            string? sub = null;
+            try
+            {
+                // 按日期/相机分组时图散在各处，角标标出它所在文件夹的名字 ——
+                // 一眼能分清是手机相册还是相机卡里的
+                string? dir = Path.GetDirectoryName(p);
+                if (!string.IsNullOrEmpty(dir)) sub = Path.GetFileName(dir);
+            }
+            catch { }
+
+            files.Add((p, sub));
+        }
+
+        ApplyFiles(files, $"共 {paths.Count} 张　·　单击选中，双击打开");
+    }
+
+    private string DescribeCurrentView()
+        => !string.IsNullOrWhiteSpace(_searchText)
+            ? $"搜索「{_searchText}」"
+            : _groupBy switch
+            {
+                GroupBy.Date => "全部照片 · 按拍摄日期",
+                GroupBy.Camera => "全部照片 · 按相机",
+                GroupBy.Lens => "全部照片 · 按镜头",
+                _ => "全部照片",
+            };
+
+    /// <summary>标题栏上跟在程序名后面的那个词。</summary>
+    private string DescribeGroupLabel()
+    {
+        if (_groupValue is null) return "全部照片";
+
+        if (FolderTree.SelectedNode?.Content is GroupNode gn)
+        {
+            // Label 里带了数量（"2026 年 9 月　128"），标题栏只要前面那段
+            int cut = gn.Label.IndexOf('　');
+            return cut > 0 ? gn.Label.Substring(0, cut) : gn.Label;
+        }
+
+        return _groupValue;
     }
 
     private void SelectTreeNodeForCurrentFolder()
@@ -354,8 +567,17 @@ public sealed partial class BrowserPage : Page
 
     private void FolderTree_ItemInvoked(TreeView sender, TreeViewItemInvokedEventArgs args)
     {
-        // "图库"那一行是分组标题，点了不加载任何目录
         var node = args.InvokedItem as TreeViewNode ?? FolderTree.SelectedNode;
+
+        // 分组条目：点它就把它限定为当前分组，右侧墙重新查一次
+        if (node?.Content is GroupNode group)
+        {
+            _groupValue = group.IsAll ? null : group.Key;
+            _ = LoadFromIndexAsync();
+            return;
+        }
+
+        // "图库"那一行是分组标题，点了不加载任何目录
         if (node?.Content is not FolderNode info || info.IsRoot) return;
 
         _ = LoadFolderAsync(info.Path);
@@ -385,6 +607,25 @@ public sealed partial class BrowserPage : Page
 
     private MenuFlyout BuildFolderMenu(TreeViewNode? node)
     {
+        // 分组模式下的条目不是文件夹，没有"路径"可言 ——
+        // 给"在资源管理器中打开""加入图库"这些动作只会让人困惑，
+        // 所以这里换成一套跟索引有关的动作。
+        if (IndexMode)
+        {
+            var groupMenu = new MenuFlyout();
+            bool busy = LibraryIndexService.Shared.IsIndexing;
+
+            groupMenu.Items.Add(MakeMenuItem(busy ? "停止整理" : "整理图库", "\uE72C",
+                () => _ = IndexActionAsync()));
+            groupMenu.Items.Add(MakeMenuItem("刷新", "\uE72C", () =>
+            {
+                BuildTree();
+                _ = LoadFromIndexAsync();
+            }));
+
+            return groupMenu;
+        }
+
         var flyout = new MenuFlyout();
         var info = node?.Content as FolderNode;
 
@@ -392,7 +633,7 @@ public sealed partial class BrowserPage : Page
         if (info is null || info.IsRoot)
         {
             flyout.Items.Add(MakeMenuItem("添加文件夹到图库…", "\uE8E5", () => _ = PickFolderAndAddAsync()));
-            flyout.Items.Add(MakeMenuItem("刷新图库", "\uE72C", BuildLibraryTree));
+            flyout.Items.Add(MakeMenuItem("刷新图库", "\uE72C", BuildTree));
             return flyout;
         }
 
@@ -417,14 +658,14 @@ public sealed partial class BrowserPage : Page
     {
         LibraryStore.Add(path);
         StartupLog.Write($"BrowserPage: 加入图库 → {path}");
-        BuildLibraryTree();
+        BuildTree();
     }
 
     private void RemoveFromLibrary(string path)
     {
         LibraryStore.Remove(path);
         StartupLog.Write($"BrowserPage: 从图库移除 → {path}");
-        BuildLibraryTree();
+        BuildTree();
     }
 
     /// <summary>重新读一个节点的子目录（用户手动按的，所以直接展开着填）。</summary>
@@ -488,7 +729,9 @@ public sealed partial class BrowserPage : Page
 
         flyout.Items.Add(MakeMenuItem("刷新", "\uE72C", Refresh));
 
-        if (_currentFolder is not null)
+        // 索引模式下"当前文件夹"这个概念不成立（图可能来自十几个目录），
+        // 那些针对单个目录的操作就不该出现在菜单里
+        if (_currentFolder is not null && !IndexMode)
         {
             string folder = _currentFolder;
 
@@ -646,6 +889,26 @@ public sealed partial class BrowserPage : Page
             return;
         }
 
+        string scope = includeSub ? "（含子文件夹）" : "";
+        string status = truncated
+            ? $"共 {files.Count} 张{scope}　·　太多了，只铺出前 {files.Count} 张"
+            : $"共 {files.Count} 张{scope}　·　单击选中，双击打开";
+
+        ApplyFiles(files, status);
+
+        // 顺手把这个目录收进索引库。
+        // 按文件夹浏览这条路本身不需要索引，但提前攒好数据，
+        // 等用户切到"按日期 / 按相机"时就能立刻出结果，不用先干等一轮整理。
+        // 扫描是增量的（文件没变就跳过），所以反复点同一个目录几乎零成本。
+        if (LibraryIndexService.Shared.Available)
+            _ = LibraryIndexService.Shared.IndexAsync(new[] { folder }, includeSub);
+    }
+
+    /// <summary>
+    /// 把一批文件铺到缩略图墙上 —— "直接扫盘"和"查索引"两条路共用这一段。
+    /// </summary>
+    private void ApplyFiles(List<(string Path, string? Sub)> files, string status)
+    {
         var list = new List<ThumbnailItem>(files.Count);
         foreach (var (path, sub) in files)
         {
@@ -665,10 +928,7 @@ public sealed partial class BrowserPage : Page
         EmptyState.Visibility = Visibility.Collapsed;
         GridScroller.ChangeView(null, 0, null, true);
 
-        string scope = includeSub ? "（含子文件夹）" : "";
-        StatusText.Text = truncated
-            ? $"共 {files.Count} 张{scope}　·　太多了，只铺出前 {files.Count} 张"
-            : $"共 {files.Count} 张{scope}　·　单击选中，双击打开";
+        StatusText.Text = status;
         UpdateCacheText();
     }
 
@@ -740,6 +1000,156 @@ public sealed partial class BrowserPage : Page
 
     // ===== 目录树的开关与入口 =====
 
+    // ===== 分类维度 / 搜索 / 整理图库 =====
+
+    /// <summary>
+    /// 换分类维度。
+    ///
+    /// 注意 XAML 里第一项写了 IsSelected="True"：解析到那一行就会触发本方法，
+    /// 那时后面几行的控件（比如"图库"标题）还没建出来，碰一下就崩。
+    /// 好在这时候选中的正是"按文件夹"，和 _groupBy 的初值相同，
+    /// 会被下面的早退挡住 —— 和 SetLayout 里那个"解析期别去碰控件"
+    /// 是同一个坑的两种形态，都是 XAML 自下而上解析造成的。
+    /// </summary>
+    private void GroupCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (GroupCombo.SelectedItem is not ComboBoxItem item) return;
+        if (item.Tag is not string tag) return;
+        if (!Enum.TryParse<GroupBy>(tag, out GroupBy by)) return;
+        if (by == _groupBy) return;
+
+        _groupBy = by;
+        _groupValue = null;
+
+        bool folderMode = by == GroupBy.Folder && string.IsNullOrWhiteSpace(_searchText);
+
+        // "包含子文件夹"只对"直接读磁盘"那条路有意义：
+        // 索引模式下图库里的目录（含子目录）全都收进来了，这个开关没有作用对象
+        IncludeSubRow.Visibility = folderMode ? Visibility.Visible : Visibility.Collapsed;
+        TreeTitle.Text = (item.Content as string) ?? "图库";
+
+        StartupLog.Write($"BrowserPage: 分类 = {by}");
+
+        if (folderMode)
+        {
+            // 退回原来的浏览方式：直接读磁盘，行为和加这个功能之前完全一致
+            BuildTree();
+            if (_currentFolder is not null) _ = LoadFolderAsync(_currentFolder);
+            else ShowEmpty("从左边选一个文件夹");
+            return;
+        }
+
+        _ = SwitchToIndexModeAsync();
+    }
+
+    /// <summary>搜索框：每敲一个字都查一遍太浪费，等手停下来再说。</summary>
+    private void SearchBox_TextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
+    {
+        // 这里没去判 args.Reason：本搜索框不给建议列表，也从不在代码里改 Text，
+        // 触发这个事件的只可能是用户敲键盘。少依赖一个 API 就少一处版本差异。
+        if (_searchDebounce is null)
+        {
+            _searchDebounce = _uiQueue.CreateTimer();
+            _searchDebounce.Interval = TimeSpan.FromMilliseconds(320);
+            _searchDebounce.IsRepeating = false;
+            _searchDebounce.Tick += (_, _) => _ = ApplySearchAsync();
+        }
+
+        _searchDebounce.Stop();
+        _searchDebounce.Start();
+    }
+
+    /// <summary>搜索框里按回车：不等防抖，立刻查。</summary>
+    private void SearchBox_QuerySubmitted(AutoSuggestBox sender, AutoSuggestBoxQuerySubmittedEventArgs args)
+        => _ = ApplySearchAsync();
+
+    private async Task ApplySearchAsync()
+    {
+        _searchText = (SearchBox.Text ?? string.Empty).Trim();
+
+        // 搜索框清空 + 按文件夹 = 回到原来那条直接读磁盘的路
+        if (!IndexMode)
+        {
+            IncludeSubRow.Visibility = Visibility.Visible;
+            BuildTree();
+            if (_currentFolder is not null) await LoadFolderAsync(_currentFolder);
+            else ShowEmpty("从左边选一个文件夹");
+            return;
+        }
+
+        _groupValue = null;
+        await SwitchToIndexModeAsync();
+    }
+
+    /// <summary>
+    /// 切到"查索引"这条模式。索引还是空的话先整理一遍再显示 ——
+    /// 否则用户只会看到一棵空的树，不知道是没图还是没整理。
+    /// </summary>
+    private async Task SwitchToIndexModeAsync()
+    {
+        var svc = LibraryIndexService.Shared;
+
+        if (!svc.Available)
+        {
+            ShowEmpty("索引库打不开，按日期/相机的分类和搜索暂时用不了（按文件夹浏览不受影响）");
+            return;
+        }
+
+        if (svc.Count == 0) await EnsureIndexedAsync();
+
+        BuildTree();
+        await LoadFromIndexAsync();
+    }
+
+    /// <summary>
+    /// 把图库里的目录收进索引库（增量，跑过一次以后再点基本是秒完成）。
+    /// </summary>
+    private async Task EnsureIndexedAsync()
+    {
+        var folders = LibraryStore.Load();
+        if (folders.Count == 0 && _currentFolder is not null) folders.Add(_currentFolder);
+
+        if (folders.Count == 0)
+        {
+            ShowEmpty("图库还是空的 —— 先用右上角的「+」把放照片的文件夹加进来");
+            return;
+        }
+
+        ShowEmpty("第一次用这个分类，正在整理图库…");
+
+        var progress = new Progress<IndexReport>(r =>
+            EmptyText.Text = $"正在整理图库…　已处理 {r.Total} 张（新增 {r.Added}）");
+
+        var report = await LibraryIndexService.Shared.IndexAsync(folders, recursive: true, progress);
+
+        StartupLog.Write(
+            $"BrowserPage: 整理图库完成 新增{report.Added} 更新{report.Updated} " +
+            $"跳过{report.Skipped} 失败{report.Failed} 清理{report.Removed}");
+    }
+
+    /// <summary>
+    /// 左上角"整理图库"按钮：正在整理时点它是"停止"，否则是"整理一遍 + 刷新"。
+    /// </summary>
+    private async void IndexButton_Click(object sender, RoutedEventArgs e)
+        => await IndexActionAsync();
+
+    private async Task IndexActionAsync()
+    {
+        var svc = LibraryIndexService.Shared;
+
+        if (svc.IsIndexing)
+        {
+            svc.Cancel();
+            StartupLog.Write("BrowserPage: 用户中止整理图库");
+            return;
+        }
+
+        await EnsureIndexedAsync();
+
+        BuildTree();
+        if (IndexMode) await LoadFromIndexAsync();
+    }
+
     /// <summary>
     /// 恢复设置时为 true。
     /// ToggleSwitch 的 Toggled 在**代码赋值**时也会触发，
@@ -788,7 +1198,7 @@ public sealed partial class BrowserPage : Page
         if (folder is null) return;   // 用户取消了
 
         LibraryStore.Add(folder);
-        BuildLibraryTree();
+        BuildTree();
         await LoadFolderAsync(folder);
     }
 

@@ -30,6 +30,14 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\CelesteViewer.Core\CelesteViewer.Core.csproj" />
+
+    <!--
+      主项目里的 LibraryIndexService 也要一起验：
+      界面切分类时用的自然排序（SortNatural）是它提供的，
+      那条路径一旦和"直接扫盘"的顺序对不上，用户换个分类就会觉得图的顺序乱了。
+      它是纯托管代码（只依赖 Core），链进来就能在控制台里跑。
+    -->
+    <Compile Include="..\..\Services\LibraryIndexService.cs" />
   </ItemGroup>
 
 </Project>

@@ -126,7 +126,7 @@ public sealed class IndexReport
 public sealed class MediaIndex : IDisposable
 {
     /// <summary>当前表结构版本。改了建表语句就加一，旧库会自动重建。</summary>
-    private const int SchemaVersion = 1;
+    private const int SchemaVersion = 2;
 
     private readonly SqliteConnection _conn;
     private readonly object _gate = new();
@@ -197,6 +197,7 @@ public sealed class MediaIndex : IDisposable
                     PixelWidth    INTEGER NOT NULL DEFAULT 0,
                     PixelHeight   INTEGER NOT NULL DEFAULT 0,
                     DateTaken     INTEGER NULL,
+                    DateEstimated INTEGER NOT NULL DEFAULT 0,
                     CameraMake    TEXT    NULL,
                     CameraModel   TEXT    NULL,
                     LensModel     TEXT    NULL,
@@ -284,13 +285,13 @@ public sealed class MediaIndex : IDisposable
                 INSERT INTO Media (
                     Path, PathLower, Directory, FileName, Kind,
                     FileSize, ModifiedTicks, PixelWidth, PixelHeight,
-                    DateTaken, CameraMake, CameraModel, LensModel,
+                    DateTaken, DateEstimated, CameraMake, CameraModel, LensModel,
                     FNumber, ExposureTime, IsoSpeed, FocalLength,
                     Rating, IndexedAt)
                 VALUES (
                     $path, $lower, $dir, $name, $kind,
                     $size, $ticks, $w, $h,
-                    $date, $make, $model, $lens,
+                    $date, $est, $make, $model, $lens,
                     $fnum, $exp, $iso, $focal,
                     $rating, $now)
                 ON CONFLICT(Path) DO UPDATE SET
@@ -303,6 +304,7 @@ public sealed class MediaIndex : IDisposable
                     PixelWidth    = excluded.PixelWidth,
                     PixelHeight   = excluded.PixelHeight,
                     DateTaken     = excluded.DateTaken,
+                    DateEstimated = excluded.DateEstimated,
                     CameraMake    = excluded.CameraMake,
                     CameraModel   = excluded.CameraModel,
                     LensModel     = excluded.LensModel,
@@ -325,10 +327,11 @@ public sealed class MediaIndex : IDisposable
             cmd.Parameters.AddWithValue("$ticks", info.LastModified.UtcTicks);
             cmd.Parameters.AddWithValue("$w", info.PixelWidth);
             cmd.Parameters.AddWithValue("$h", info.PixelHeight);
-            cmd.Parameters.AddWithValue("$date",
-                info.DateTaken.HasValue
-                    ? (object)info.DateTaken.Value.ToUnixTimeMilliseconds()
-                    : DBNull.Value);
+            // 拍摄时间优先，没有就用文件修改时间兜底 —— 见 ResolveDate 的说明
+            var (dateMs, estimated) = ResolveDate(info);
+
+            cmd.Parameters.AddWithValue("$date", (object?)dateMs ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$est", estimated ? 1 : 0);
             cmd.Parameters.AddWithValue("$make", (object?)info.CameraMake ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$model", (object?)info.CameraModel ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$lens", (object?)info.LensModel ?? DBNull.Value);
@@ -341,6 +344,31 @@ public sealed class MediaIndex : IDisposable
 
             cmd.ExecuteNonQuery();
         }
+    }
+
+    /// <summary>
+    /// 这张图"算作什么时候的"。
+    ///
+    /// 为什么要兜底：只有相机/手机拍的照片才写 EXIF 拍摄时间。
+    /// 截图、AI 生成图、还有将来要收进来的微信/QQ 缓存图，一张都没有 ——
+    /// 实测本机 72 张图里 72 张都没有拍摄时间，那时"按日期"这个维度
+    /// 整屏只剩一个"无日期"，等于白做。
+    ///
+    /// 文件修改时间是最合适的替补：它至少能说明"这张图大概什么时候出现在
+    /// 电脑上"，对组织照片来说够用了。Lightroom、Windows 照片也是这么干的。
+    ///
+    /// 用 DateEstimated 记下"这个时间是猜的"，
+    /// 将来要区分"真拍摄时间"和"推算时间"时有据可查。
+    /// </summary>
+    private static (long? Ms, bool Estimated) ResolveDate(PhotoInfo info)
+    {
+        if (info.DateTaken.HasValue)
+            return (info.DateTaken.Value.ToUnixTimeMilliseconds(), false);
+
+        if (info.LastModified != default)
+            return (info.LastModified.ToUnixTimeMilliseconds(), true);
+
+        return (null, true);
     }
 
     /// <summary>删掉一条记录（文件被删了、或从图库里移除了）。</summary>

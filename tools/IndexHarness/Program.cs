@@ -37,6 +37,7 @@ internal static class Program
 
         await RealFilesAsync(db);
         await SyntheticAsync(db);
+        NaturalSort();
 
         Console.WriteLine();
         Console.WriteLine(_fail == 0 ? "==== 全部通过 ====" : $"==== 有 {_fail} 项失败 ====");
@@ -184,6 +185,47 @@ internal static class Program
         Check("删除一条后总数减一", index.Count == before - 1, $"{before} → {index.Count}");
     }
 
+    // ==================== C. 自然排序（界面切分类时用） ====================
+
+    /// <summary>
+    /// 界面上有两条出图的路：直接扫盘（FolderIndex）、查索引（MediaIndex）。
+    /// 按文件夹浏览走前者，按日期/相机走后者。两条路给的顺序必须一致，
+    /// 否则用户从"按文件夹"切到"按日期"再切回来，会觉得图的顺序被弄乱了。
+    ///
+    /// 麻烦在于 SQLite 排文件名是字典序：IMG_10 会排在 IMG_2 前面。
+    /// Scanner 那条路用的是自然序（数字按大小比）。所以查索引之后要按自然序重排，
+    /// 这一段就是验那个重排是不是真的对齐了。
+    /// </summary>
+    private static void NaturalSort()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== C. 自然排序 ===");
+
+        string[] names =
+        {
+            "IMG_10.jpg", "IMG_2.jpg", "IMG_1.jpg",
+            "photo20.png", "photo3.png", "ABC.jpg",
+        };
+        string[] paths = names.Select(n => Path.Combine("D:", "x", n)).ToArray();
+
+        var sorted = LibraryIndexService.SortNatural(paths);
+        var expected = paths.OrderBy(p => p, Comparer<string>.Create(FolderIndex.CompareNatural)).ToList();
+
+        Console.WriteLine("      结果：" + string.Join("  ", sorted.Select(Path.GetFileName)));
+
+        Check("和 FolderIndex 的自然序口径一致", sorted.SequenceEqual(expected));
+
+        // 关键：数字按大小比，不是按字符比（字典序下 IMG_10 会跑到 IMG_2 前面）
+        var head = sorted.Take(4).Select(Path.GetFileName).ToList();
+        Check("IMG_2 排在 IMG_10 前面（不是字典序）",
+              head.IndexOf("IMG_2.jpg") >= 0
+              && head.IndexOf("IMG_10.jpg") >= 0
+              && head.IndexOf("IMG_2.jpg") < head.IndexOf("IMG_10.jpg"));
+
+        var desc = LibraryIndexService.SortNatural(paths, descending: true);
+        Check("降序是升序的完全反转", desc.SequenceEqual(sorted.AsEnumerable().Reverse()));
+    }
+
     // ==================== B. 合成数据 ====================
 
     private static async Task SyntheticAsync(string db)
@@ -253,9 +295,43 @@ internal static class Program
               byDate.Count >= 30 && byDate.Count <= 40, $"{byDate.Count} 组");
         Check("日期分组之和 = 总数", byDate.Sum(g => g.Count) == N);
         Check("相机分组之和 = 总数", byCamera.Sum(g => g.Count) == N);
-        Check("存在「无日期」组（对应没 EXIF 的图）",
-              byDate.Any(g => g.Label == "无日期"),
-              byDate.FirstOrDefault(g => g.Label == "无日期")?.Count + " 张");
+        // 没有拍摄时间的图会退到"文件修改时间"，所以不该再有大堆图堆在"无日期"里。
+        // 改这条判据之前是"必须存在无日期组" —— 兜底逻辑上线后正好反过来。
+        int noDate = byDate.Where(g => g.Label == "无日期").Sum(g => g.Count);
+        Check("无 EXIF 的图退到文件时间，不再堆在「无日期」里",
+              noDate == 0, $"无日期 {noDate} 张");
+
+        // 单独造一条：只有文件时间、没有拍摄时间。它必须出现在文件时间那一组里。
+        // 这条最要紧 —— 微信/QQ 缓存图、截图、AI 生成图全是这种，
+        // 兜底不成立的话"按日期"在真实图库里就是个空壳。
+        index.Upsert(new PhotoInfo
+        {
+            Path = @"D:\Photos\NoExif.jpg",
+            FileSize = 1234,
+            PixelWidth = 100,
+            PixelHeight = 100,
+            LastModified = new DateTimeOffset(2026, 3, 15, 10, 0, 0, TimeSpan.Zero),
+            DateTaken = null,
+        });
+
+        var march = index.Query(new MediaQuery { Group = GroupBy.Date, GroupValue = "2026-03" });
+        Check("没 EXIF 的图按文件修改时间归到 2026 年 3 月",
+              march.Any(p => p.EndsWith("NoExif.jpg", StringComparison.OrdinalIgnoreCase)),
+              $"2026-03 组共 {march.Count} 张");
+
+        // 连文件时间都没有的极端情况：归到"无日期"，不崩
+        index.Upsert(new PhotoInfo
+        {
+            Path = @"D:\Photos\NoTimeAtAll.jpg",
+            FileSize = 12,
+            PixelWidth = 1,
+            PixelHeight = 1,
+        });
+
+        var timeless = index.Query(new MediaQuery { Group = GroupBy.Date, GroupValue = "" });
+        Check("连文件时间都没有的图归到「无日期」，不崩",
+              timeless.Any(p => p.EndsWith("NoTimeAtAll.jpg", StringComparison.OrdinalIgnoreCase)),
+              $"无日期组共 {timeless.Count} 张");
 
         // ---- 查询性能：这才是规模测试的重点 ----
         var swQ = Stopwatch.StartNew();
@@ -301,6 +377,12 @@ internal static class Program
               $"实得 {exHits.Count}，期望 {N / 100}");
 
         // ---- 点月份 → 数量必须和分组标注的一致（最容易写错的地方）----
+
+        // 上面为了验兜底又往库里插了两条，分组得重新取，
+        // 否则拿的是加数据之前那份统计，自然对不上
+        byDate = index.Group(GroupBy.Date);
+        byCamera = index.Group(GroupBy.Camera);
+
         int mismatch = 0;
         foreach (var g in byDate)
         {
