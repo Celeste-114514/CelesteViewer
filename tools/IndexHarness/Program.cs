@@ -38,6 +38,7 @@ internal static class Program
         await RealFilesAsync(db);
         await SyntheticAsync(db);
         NaturalSort();
+        await Signature();
 
         Console.WriteLine();
         Console.WriteLine(_fail == 0 ? "==== 全部通过 ====" : $"==== 有 {_fail} 项失败 ====");
@@ -224,6 +225,236 @@ internal static class Program
 
         var desc = LibraryIndexService.SortNatural(paths, descending: true);
         Check("降序是升序的完全反转", desc.SequenceEqual(sorted.AsEnumerable().Reverse()));
+    }
+
+    // ============ D. 文件头嗅探（no decode delegate 的根治点） ============
+
+    /// <summary>造一段文件头：前面给真实魔数，后面填够长度。</summary>
+    private static byte[] Head(params byte[] prefix)
+    {
+        var buf = new byte[Math.Max(64, prefix.Length)];
+        prefix.CopyTo(buf, 0);
+        // 后半段填 0，模拟真实的二进制内容（不会干扰文本判定）
+        return buf;
+    }
+
+    private static byte[] Text(string s)
+    {
+        var buf = new byte[64];
+        var bytes = System.Text.Encoding.ASCII.GetBytes(s);
+        bytes.CopyTo(buf, 0);
+        return buf;
+    }
+
+    private static async Task Signature()
+    {
+        Console.WriteLine();
+        Console.WriteLine("==== D. 文件头嗅探（2026-09-15 no decode delegate 的根治点）====");
+        Console.WriteLine();
+
+        // ---- D1. 已知格式的魔数必须放行 ----
+        // 这里漏掉任何一个，用户的照片就会"明明在、却死活打不开"，是最严重的事故。
+        var images = new (string Name, byte[] Head)[]
+        {
+            ("JPEG",      Head(0xFF,0xD8,0xFF,0xE0,0x00,0x10,0x4A,0x46)),
+            ("PNG",       Head(0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A)),
+            ("GIF89a",    Text("GIF89a" + new string(' ', 20))),
+            ("BMP",       Head(0x42,0x4D,0x36,0x00,0x00,0x00,0x00,0x00)),
+            ("TIFF-LE",   Head(0x49,0x49,0x2A,0x00,0x08,0x00,0x00,0x00)),
+            ("TIFF-BE",   Head(0x4D,0x4D,0x00,0x2A,0x00,0x00,0x00,0x08)),
+            ("WEBP",      Head(0x52,0x49,0x46,0x46,0x1A,0x00,0x00,0x00,0x57,0x45,0x42,0x50)),
+            ("HEIC",      Head(0x00,0x00,0x00,0x18,0x66,0x74,0x79,0x70,0x68,0x65,0x69,0x63)),
+            ("AVIF",      Head(0x00,0x00,0x00,0x1C,0x66,0x74,0x79,0x70,0x61,0x76,0x69,0x66)),
+            ("ICO",       Head(0x00,0x00,0x01,0x00,0x01,0x00,0x10,0x10)),
+            ("PSD",       Head(0x38,0x42,0x50,0x53,0x00,0x01,0x00,0x00)),
+            ("OpenEXR",   Head(0x76,0x2F,0x31,0x01,0x02,0x00,0x00,0x00)),
+            ("JPEG-XL",   Head(0xFF,0x0A,0x0C,0x04,0x0B,0x20,0x20,0x10)),
+            ("HDR",       Text("#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n")),
+            ("XCF",       Text("gimp xcf v011\0\0\0")),
+            ("PPM(P6)",   Text("P6\n# comment\n4000 3000\n255\n")),
+            ("DDS",       Head(0x44,0x44,0x53,0x20,0x7C,0x00,0x00,0x00)),
+            ("QOI",       Text("qoif" + new string(' ', 12))),
+        };
+
+        int missed = 0;
+        foreach (var (name, head) in images)
+        {
+            bool ok = FileSignature.LooksLikeImage(head);
+            if (!ok) { missed++; Console.WriteLine($"     误杀：{name}"); }
+        }
+        Check($"{images.Length} 种真实图片格式全部放行", missed == 0, $"误杀 {missed} 种");
+
+        // ---- D2. 文本必须挡住（这次事故的直接原因）----
+        var texts = new (string Name, byte[] Head)[]
+        {
+            ("md5 校验清单", Text("7dc975747cdcfc3d6a2586a6229767f4 *tests/data/apng.png")),
+            ("路径引用行",   Text("tests/data/images/none.gbrapf32le.exr/%02d.exr\n")),
+            ("HTML 报错页",  Text("<!DOCTYPE html><html><head><title>404 Not Found")),
+            ("JSON 错误",    Text("{\"error\":\"not found\",\"code\":404,\"msg\":\"no\"")),
+            ("git-lfs 指针", Text("version https://git-lfs.github.com/spec/v1\noid sha2")),
+            ("纯数字文本",   Text("12345678901234567890123456789012345678901234567890")),
+        };
+
+        int leaked = 0;
+        foreach (var (name, head) in texts)
+        {
+            bool ok = !FileSignature.LooksLikeImage(head);
+            if (!ok) { leaked++; Console.WriteLine($"     漏网：{name}"); }
+        }
+        Check($"{texts.Length} 种文本内容全部挡住", leaked == 0, $"漏网 {leaked} 种");
+
+        // ---- D3. 边界：太短 / 空的不能当图 ----
+        Check("空数组不是图", !FileSignature.LooksLikeImage(ReadOnlySpan<byte>.Empty));
+        Check("4 字节不是图（连最短文件头都不够）",
+              !FileSignature.LooksLikeImage(new byte[] { 0x89, 0x50, 0x4E, 0x47 }));
+
+        // ---- D4. 不认识的二进制要放行（宁可让解码器失败，也不能误杀新格式）----
+        Check("未知二进制放行（不误杀未来的新格式）",
+              FileSignature.LooksLikeImage(Head(0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89)));
+
+        // ---- D5. 嗅探不能破坏流的位置（否则解码器会读到错位的数据）----
+        var buf2 = new byte[128];
+        new byte[] { 0xFF, 0xD8, 0xFF, 0xE0 }.CopyTo(buf2, 0);
+        using var ms = new MemoryStream(buf2);
+        ms.Position = 0;
+        FileSignature.LooksLikeImage(ms);
+        Check("嗅探后流位置不变（不会把解码器带偏）", ms.Position == 0, $"Position={ms.Position}");
+
+        // ---- D6. 真实目录：统计 + 抓误判 ----
+        Console.WriteLine();
+        string[] roots =
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), ""),
+            Environment.GetFolderPath(Environment.SpecialFolder.MyPictures),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"),
+        };
+
+        int total = 0, judgedNotImage = 0, falsePositive = 0, scanned = 0;
+        var samples = new List<string>();
+        var notImageFiles = new List<string>();
+        string[] exts =
+        {
+            ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp",
+            ".heic", ".heif", ".avif", ".psd", ".psb", ".jxl", ".ico", ".jfif",
+            ".arw", ".cr2", ".cr3", ".nef", ".nrw", ".orf", ".rw2", ".raf",
+            ".dng", ".pef", ".srw", ".tga", ".pcx", ".ppm", ".pgm", ".pbm",
+            ".xcf", ".exr", ".hdr",
+        };
+
+        foreach (string root in roots)
+        {
+            if (!Directory.Exists(root)) continue;
+            foreach (string file in EnumerateSafe(root))
+            {
+                if (Array.IndexOf(exts, Path.GetExtension(file).ToLowerInvariant()) < 0) continue;
+                if (++scanned > 40000) break;
+
+                total++;
+                bool looks;
+                try
+                {
+                    using var fs = new FileStream(file, FileMode.Open, FileAccess.Read,
+                                                  FileShare.ReadWrite, 64, FileOptions.SequentialScan);
+                    looks = FileSignature.LooksLikeImage(fs);
+                }
+                catch { continue; }
+
+                if (looks) continue;
+                judgedNotImage++;
+                if (notImageFiles.Count < 40) notImageFiles.Add(file);
+
+                // 判成"不是图"的，内容必须真的是文本 —— 否则就是误杀用户的照片
+                bool reallyText;
+                try
+                {
+                    byte[] h = new byte[64];
+                    int n;
+                    using (var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                        n = fs.Read(h, 0, h.Length);
+                    int printable = 0;
+                    for (int i = 0; i < n; i++)
+                    {
+                        byte b = h[i];
+                        if ((b >= 0x20 && b < 0x7F) || b is 0x09 or 0x0A or 0x0D) printable++;
+                    }
+                    reallyText = n >= 8 && printable >= n - (n / 20);
+                }
+                catch { reallyText = false; }
+
+                if (!reallyText)
+                {
+                    falsePositive++;
+                    if (samples.Count < 5) samples.Add(file);
+                }
+                else if (samples.Count < 3 && judgedNotImage <= 3)
+                {
+                    samples.Add("(文本) " + file);
+                }
+            }
+        }
+
+        Console.WriteLine($"  扫描真实图片文件 {total} 个，判为「不是图」{judgedNotImage} 个");
+        foreach (string s in samples) Console.WriteLine($"      {s}");
+
+        Check("判为「不是图」的文件，内容确实都是文本（没有误杀真照片）",
+              falsePositive == 0, $"误杀 {falsePositive} 个");
+        Check("绝大多数真实图片被正确放行（放行率 ≥ 80%）",
+              total == 0 || (total - judgedNotImage) * 100 / total >= 80,
+              total > 0 ? $"放行 {total - judgedNotImage}/{total}" : "没扫到文件");
+
+        // ---- D7. 端到端：真解码器碰到这些文件，必须"安静地返回 null" ----
+        // 这一条直接对应事故现场：以前 Magick 会抛 no decode delegate，
+        // 调试器每回中断一次。现在应该连 Magick 都不会被叫到。
+        if (notImageFiles.Count == 0)
+        {
+            Console.WriteLine("  （本机没有这类文件，跳过端到端验证）");
+            return;
+        }
+
+        var decoder = new MagickImageDecoder();
+        int threw = 0, gotNull = 0;
+        foreach (string f in notImageFiles.Take(10))
+        {
+            try
+            {
+                PhotoInfo? r = await decoder.ProbeAsync(f);
+                if (r is null) gotNull++;
+            }
+            catch (Exception ex)
+            {
+                threw++;
+                if (threw <= 2) Console.WriteLine($"     抛异常：{ex.GetType().Name} {f}");
+            }
+        }
+
+        int tried = Math.Min(10, notImageFiles.Count);
+        Check($"Magick 解码器对这 {tried} 个文件安静返回 null、一个都不抛",
+              threw == 0 && gotNull == tried, $"抛 {threw} 次 / 返回 null {gotNull} 次");
+    }
+
+    /// <summary>枚举目录，遇到没权限的子目录就跳过（Downloads 里什么都有）。</summary>
+    private static IEnumerable<string> EnumerateSafe(string root)
+    {
+        var stack = new Stack<string>();
+        stack.Push(root);
+        while (stack.Count > 0)
+        {
+            string dir = stack.Pop();
+
+            string[] files;
+            try { files = Directory.GetFiles(dir); }
+            catch { continue; }
+            foreach (string f in files) yield return f;
+
+            string[] subs;
+            try { subs = Directory.GetDirectories(dir); }
+            catch { continue; }
+            foreach (string d in subs)
+            {
+                if (Path.GetFileName(d).StartsWith('.')) continue;
+                stack.Push(d);
+            }
+        }
     }
 
     // ==================== B. 合成数据 ====================

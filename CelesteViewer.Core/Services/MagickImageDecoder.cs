@@ -44,6 +44,25 @@ public sealed class MagickImageDecoder : IImageDecoder
         => _noDelegate.Contains(Path.GetExtension(path));
 
     /// <summary>
+    /// 已经记过日志的失败路径。
+    ///
+    /// 解码失败是**静默**的（返回 null，不打断浏览）—— 这是对的，
+    /// 图库里混一张坏图不该弹窗。但静默过头就变成"用户说打不开、我查不到任何线索"。
+    /// 所以每个路径只记一次：缩略图墙会对同一张图反复重试，不记会刷出几千行。
+    /// </summary>
+    private static readonly HashSet<string> _logged = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly object _loggedLock = new();
+
+    private static void LogOnce(string path, string reason)
+    {
+        lock (_loggedLock)
+        {
+            if (!_logged.Add(path)) return;
+        }
+        StartupLog.Write($"[解码跳过] {reason}：{path}");
+    }
+
+    /// <summary>
     /// 扩展名 → MagickFormat 的映射。
     ///
     /// 关键点：MagickImage 直接吃一个裸流时，靠"读文件头猜格式"。
@@ -132,8 +151,9 @@ public sealed class MagickImageDecoder : IImageDecoder
         {
             throw;
         }
-        catch
+        catch (Exception ex)
         {
+            LogOnce(path, "Magick 探测失败：" + ShortMessage(ex));
             return null;
         }
     }
@@ -157,6 +177,15 @@ public sealed class MagickImageDecoder : IImageDecoder
             // 0 字节文件（空文件 / 截断的下载）没有像素可解，
             // 直接判"打不开"而不是交给 Magick 抛一堆看不懂的异常。
             if (source.CanSeek && source.Length == 0) return null;
+
+            // 同 ProbeAsync：先看文件头，不是图就别让 Magick 去猜。
+            // 这一步是 2026-09-15 那个 no decode delegate 异常的根治点 ——
+            // 猜不出格式时会抛异常（虽然被下面 catch 住，但调试器每回都中断一次）。
+            if (!FileSignature.LooksLikeImage(source))
+            {
+                LogOnce(path, "内容不是图片（扩展名是骗人的）");
+                return null;
+            }
 
             MagickFormat? hint = FormatFor(path);
 
@@ -212,10 +241,31 @@ public sealed class MagickImageDecoder : IImageDecoder
         {
             throw;
         }
-        catch
+        catch (Exception ex)
         {
+            // 走到这里说明文件头看着像图、但 Magick 还是解不开
+            // （多半是这个构建没带对应委托、或者文件本身是坏的）。
+            // 记一行日志：以前这里静默返回 null，出问题时一点线索都没有。
+            LogOnce(path, "Magick 解码失败：" + ShortMessage(ex));
             return null;
         }
+    }
+
+    /// <summary>
+    /// 异常消息截短，避免一个几百字符的 ImageMagick 报错刷满日志。
+    /// 顺带把"没带委托"这种最常见的情况翻成一句人话。
+    /// </summary>
+    private static string ShortMessage(Exception ex)
+    {
+        string msg = ex.Message ?? ex.GetType().Name;
+
+        if (ex is MagickMissingDelegateErrorException)
+            return "这个 Magick.NET 构建没带该格式的解码委托（格式：" +
+                   (msg.Contains("''") ? "探测不出" : msg) + "）";
+
+        int nl = msg.IndexOf('\n');
+        if (nl > 0) msg = msg[..nl];
+        return msg.Length > 160 ? msg[..160] + "…" : msg;
     }
 
     /// <summary>EXIF 方向 5~8 表示转了 90° 或 270°，宽高要互换。</summary>

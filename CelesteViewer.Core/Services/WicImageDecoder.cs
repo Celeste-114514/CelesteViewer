@@ -75,6 +75,10 @@ public sealed class WicImageDecoder : IImageDecoder
             using Stream? source = ArchiveIndex.OpenSource(path);
             if (source is null) return null;
 
+            // 内容根本不是图片就别去麻烦 WIC 了 —— 一次失败的 COM 解码尝试
+            // 比读 64 字节文件头贵得多。理由见 FileSignature 的注释。
+            if (!FileSignature.LooksLikeImage(source)) return null;
+
             using var randomAccess = source.AsRandomAccessStream();
             var decoder = await BitmapDecoder.CreateAsync(randomAccess).AsTask(ct);
 
@@ -124,6 +128,9 @@ public sealed class WicImageDecoder : IImageDecoder
             // 它之后还要回头读这个流，所以 using 的作用域要罩到方法结束。
             using Stream? source = ArchiveIndex.OpenSource(path);
             if (source is null) return null;
+
+            // 同 ProbeAsync：先花 64 字节确认这玩意儿像不像图，不是就别进 COM。
+            if (!FileSignature.LooksLikeImage(source)) return null;
 
             using var randomAccess = source.AsRandomAccessStream();
             var decoder = await BitmapDecoder.CreateAsync(randomAccess).AsTask(ct);
