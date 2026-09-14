@@ -25,6 +25,16 @@
 !define DOTNET_URL "https://dotnet.microsoft.com/zh-cn/download/dotnet/9.0/runtime"
 !define WASDK_URL "https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads"
 
+; Windows App SDK 2.x 的框架包名形如
+;   Microsoft.WindowsAppRuntime.2_2.4.0.0_x64__8wekyb3d8bbwe
+; 前半截是固定前缀（下面这个 define，长度正好 29 个字符，代码里按长度截取比对），
+; 后半截带版本和架构，会随版本变化，所以只比前缀。
+; 注意别把 Microsoft.WindowsAppRuntime.CBS.2 算进来 —— 那前缀对不上，天然排除。
+!define WASDK_PKG_PREFIX "Microsoft.WindowsAppRuntime.2"
+; MSIX 包对当前用户注册后，包名会作为键名落在下面这个注册表路径里。
+; 这是**不启动任何外部程序**就能查到包列表的地方，用来当主判据。
+!define APPX_REPO "Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages"
+
 Unicode true
 ; User-level install, no admin needed
 RequestExecutionLevel user
@@ -73,6 +83,10 @@ Var MissingList
 Var MissingDotnet
 Var MissingWasdk
 Var DirProbe
+Var ProbeIdx          ; 枚举注册表包仓库时的下标
+Var ProbeKey          ; 枚举出来的键名
+Var WasdkRepoHit      ; 注册表里是否找到 WindowsAppRuntime 2.x（1=找到）
+Var PsExitCode        ; 兜底问 PowerShell 时它的原始退出码（诊断用）
 
 ; ---------- 安装位置可写性校验 ----------
 ; 在"选择安装位置"页点「下一步」时调用（MUI_PAGE_CUSTOMFUNCTION_LEAVE）。
@@ -164,25 +178,66 @@ net9_done:
 net9_ok:
 
   ; ---- 2. Windows App SDK 2.x 运行时 ----
-  ; 判据：系统里装了名为 Microsoft.WindowsAppRuntime.2 的 MSIX 包。
-  ; 这东西没有稳定的注册表/文件位置可查，只能问 PowerShell。
-  ; nsExec 第一个 Pop 是退出码；命令本身没跑起来时是字符串 "error"。
-  nsExec::ExecToStack "powershell.exe -NoProfile -Command $\"if (Get-AppxPackage -Name 'Microsoft.WindowsAppRuntime.2') { exit 0 } else { exit 1 }$\""
-  Pop $R0
+  ; 需要的包名是 Microsoft.WindowsAppRuntime.2（框架包，2.4.0.0 这种）。
+  ;
+  ; 【为什么改过一轮判据】
+  ;   最初这里只问 PowerShell（Get-AppxPackage），并且把"退出码不是 0"一律当成
+  ;   "没装"。实测发现这个判据太脆：只要那条命令有任何意外 —— 被安全软件拦下、
+  ;   nsExec 拿不到退出码、PowerShell 起不来 —— 都会得到非 0 的结果，于是给
+  ;   明明装好运行时的用户弹一句"缺少 Windows App SDK 运行时"（2026-09-14 用户实际踩到）。
+  ;   检测手段失灵，不该变成一句吓人的误报。
+  ;
+  ; 【现在的判据】分主副两级，只要有一级说"装了"就算装了：
+  ;   主：读注册表包仓库（EnumRegKey 遍历，纯 API、不开进程，最稳）。
+  ;   副：兜底问一次 PowerShell，但**只有它明确回答 1（查了、确实没有）才算缺**。
+  ;       返回别的任何值（0 / error / 超时 / 被拦）都当"装了"。
+  ;
+  ; 【为什么不查 HKLM 那边】实测 HKLM 同名路径下只有 1 个条目，且与 WASDK 无关；
+  ;   而包对用户注册后一定会出现在 HKCU 这条路径下（本机实测 278 个包里能查到）。
+  StrCpy $WasdkRepoHit "0"
+  StrCpy $ProbeIdx "0"
+wasdk_reg_loop:
+  EnumRegKey $ProbeKey HKCU "${APPX_REPO}" $ProbeIdx
+  StrCmp $ProbeKey "" wasdk_reg_done
+  StrCpy $R8 $ProbeKey 29                  ; 29 = "${WASDK_PKG_PREFIX}" 的长度
+  StrCmp $R8 "${WASDK_PKG_PREFIX}" wasdk_reg_hit
+  IntOp $ProbeIdx $ProbeIdx + 1
+  Goto wasdk_reg_loop
+wasdk_reg_hit:
+  StrCpy $WasdkRepoHit "1"
+wasdk_reg_done:
+  StrCmp $WasdkRepoHit "1" wasdk_ok
+
+  ; 兜底：nsExec 第一个 Pop 是退出码；命令本身没跑起来时是字符串 "error"。
+  nsExec::ExecToStack /TIMEOUT=30000 "powershell.exe -NoProfile -Command $\"if (Get-AppxPackage -Name 'Microsoft.WindowsAppRuntime.2') { exit 0 } else { exit 1 }$\""
+  Pop $PsExitCode
   Pop $R1
-  StrCmp $R0 "0" wasdk_ok
-  StrCmp $R0 "error" wasdk_ok        ; 查不出来就别吓唬人，当它装了
+  StrCmp $PsExitCode "1" 0 wasdk_ok        ; 只有明确回答 1 才算缺
   StrCpy $MissingWasdk "1"
   StrCpy $MissingList "$MissingList  · Windows App SDK 运行时（WindowsAppRuntime 2.x）$\r$\n"
 wasdk_ok:
 FunctionEnd
 
+; 把检测过程记一份到 %TEMP%，万一以后还有误报，直接看这个文件就知道
+; 每级判据实际返回了什么，不用再猜。
+Function WriteDiagLog
+  FileOpen $9 "$TEMP\CelesteViewer-setup-diag.log" w
+  FileWrite $9 "--- CelesteViewer 安装包运行时检测 ---$\r$\n"
+  FileWrite $9 "MissingDotnet = $MissingDotnet  (1 = 判定为缺)$\r$\n"
+  FileWrite $9 "MissingWasdk  = $MissingWasdk  (1 = 判定为缺)$\r$\n"
+  FileWrite $9 "WasdkRepoHit  = $WasdkRepoHit  (1 = 注册表里查到了 WindowsAppRuntime 2.x)$\r$\n"
+  FileWrite $9 "PsExitCode    = $PsExitCode  (PowerShell 兜底查询的退出码)$\r$\n"
+  FileWrite $9 "MissingList   = $MissingList$\r$\n"
+  FileClose $9
+FunctionEnd
+
 Function .onInit
   Call DetectRuntimes
+  Call WriteDiagLog                     ; 顺手记一份到 %TEMP%，方便事后排查
   StrCmp $MissingList "" all_ok
 
   MessageBox MB_YESNO|MB_ICONEXCLAMATION \
-    "检测到这台电脑上还缺以下运行组件：$\r$\n$\r$\n$MissingList$\r$\n缺了它们，装完双击也没反应。$\r$\n$\r$\n现在打开下载页面？装好之后重新运行本安装包即可。" \
+    "没有检测到下面这些运行组件：$\r$\n$\r$\n$MissingList$\r$\n本程序是“框架依赖”版，这两样是运行前提，缺了装完双击没反应。$\r$\n$\r$\n说明：这项检测是读注册表和系统包列表得出的，个别情况下可能不准。$\r$\n如果你确认装过、或者程序之前本来就能启动，点「否」直接继续安装即可，不影响安装结果。$\r$\n$\r$\n点「是」= 现在打开官方下载页面（装好后重新运行本安装包）$\r$\n点「否」= 先不管，继续安装" \
     IDNO skip_open
 
   ; 只开真正缺的那个页面 —— 缺一个就开一个，别一股脑弹两个标签
