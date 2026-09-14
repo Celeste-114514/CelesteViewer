@@ -97,6 +97,15 @@ public sealed partial class BrowserPage : Page
     private DispatcherQueueTimer? _searchDebounce;
 
     /// <summary>
+    /// 正在生效的标签筛选。null = 没在按标签筛。
+    ///
+    /// 它和 _searchText 是两条独立的筛选线：搜索词去比文件名/相机，
+    /// 标签去比 Tags 表，两者可以叠加（搜"Canon"再看打了"旅行"标签的）。
+    /// 入口在搜索框的建议列表里 —— 敲字时图库里已有的标签会冒出来，点一个就筛。
+    /// </summary>
+    private string? _tagFilter;
+
+    /// <summary>
     /// 用户手动选的排序方式。null = "默认（跟随分类）"。
     ///
     /// 为什么默认值不是一个具体的 SortKey、而是 null：
@@ -120,7 +129,8 @@ public sealed partial class BrowserPage : Page
     /// </summary>
     private bool IndexMode => _groupBy != GroupBy.Folder
                               || !string.IsNullOrWhiteSpace(_searchText)
-                              || _favOnly;   // 收藏只存在于索引库里，开了它就必须走查库这条路
+                              || _favOnly   // 收藏只存在于索引库里，开了它就必须走查库这条路
+                              || _tagFilter is not null;   // 标签同理
 
     /// <summary>"只看收藏"开关。开着时永远走索引那条路（磁盘直读没有收藏的概念）。</summary>
     private bool _favOnly;
@@ -403,6 +413,8 @@ public sealed partial class BrowserPage : Page
     private MediaQuery FilterWithoutGroup() => new()
     {
         Text = string.IsNullOrWhiteSpace(_searchText) ? null : _searchText,
+        FavoritesOnly = _favOnly,
+        Tag = _tagFilter,
     };
 
     /// <summary>给"右侧墙"用的查询条件。</summary>
@@ -412,6 +424,7 @@ public sealed partial class BrowserPage : Page
         Group = _groupBy,
         GroupValue = _groupValue,
         FavoritesOnly = _favOnly,
+        Tag = _tagFilter,
         // 按文件夹时保持"跟资源管理器一样的名字顺序"，其余维度按拍摄时间倒序更实用。
         // 用户在排序菜单里选过的话以他选的为准。
         Sort = EffectiveSort(),
@@ -439,7 +452,9 @@ public sealed partial class BrowserPage : Page
         string heading = DescribeCurrentView();
 
         PathText.Text = heading;
-        TitleText.Text = !string.IsNullOrWhiteSpace(_searchText) ? _searchText : DescribeGroupLabel();
+        TitleText.Text = _tagFilter is not null ? $"标签「{_tagFilter}」"
+            : !string.IsNullOrWhiteSpace(_searchText) ? _searchText
+            : DescribeGroupLabel();
         TitleDot.Visibility = Visibility.Visible;
 
         if (paths.Count == 0)
@@ -451,7 +466,9 @@ public sealed partial class BrowserPage : Page
 
             ShowEmpty(string.IsNullOrWhiteSpace(_searchText)
                 ? "这一类里还没有图"
-                : $"没有匹配「{_searchText}」的图");
+                : _tagFilter is not null
+                    ? $"没有匹配的图（标签「{_tagFilter}」）"
+                    : $"没有匹配「{_searchText}」的图");
             return;
         }
 
@@ -476,15 +493,23 @@ public sealed partial class BrowserPage : Page
     }
 
     private string DescribeCurrentView()
-        => !string.IsNullOrWhiteSpace(_searchText)
+    {
+        if (_tagFilter is not null)
+            return $"标签「{_tagFilter}」"
+                   + (string.IsNullOrWhiteSpace(_searchText)
+                       ? ""
+                       : $" · 搜索「{_searchText}」");
+        return !string.IsNullOrWhiteSpace(_searchText)
             ? $"搜索「{_searchText}」"
             : _groupBy switch
             {
                 GroupBy.Date => "全部照片 · 按拍摄日期",
                 GroupBy.Camera => "全部照片 · 按相机",
                 GroupBy.Lens => "全部照片 · 按镜头",
+                GroupBy.Rating => "全部照片 · 按评分",
                 _ => "全部照片",
             };
+    }
 
     /// <summary>标题栏上跟在程序名后面的那个词。</summary>
     private string DescribeGroupLabel()
@@ -1251,8 +1276,9 @@ public sealed partial class BrowserPage : Page
         _groupBy = by;
         _groupValue = null;
 
-        // 收藏开关开着时不允许退回"直接读磁盘"——收藏在索引里，磁盘上没有
-        bool folderMode = by == GroupBy.Folder && string.IsNullOrWhiteSpace(_searchText) && !_favOnly;
+        // 收藏/标签筛开着时不允许退回"直接读磁盘"——它们只存在于索引里
+        bool folderMode = by == GroupBy.Folder && string.IsNullOrWhiteSpace(_searchText)
+                          && !_favOnly && _tagFilter is null;
 
         // "包含子文件夹"只对"直接读磁盘"那条路有意义：
         // 索引模式下图库里的目录（含子目录）全都收进来了，这个开关没有作用对象
@@ -1276,7 +1302,7 @@ public sealed partial class BrowserPage : Page
     /// <summary>搜索框：每敲一个字都查一遍太浪费，等手停下来再说。</summary>
     private void SearchBox_TextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
     {
-        // 这里没去判 args.Reason：本搜索框不给建议列表，也从不在代码里改 Text，
+        // 这里没去判 args.Reason：本搜索框从不在代码里改 Text（UpdateTextOnSelect 关了），
         // 触发这个事件的只可能是用户敲键盘。少依赖一个 API 就少一处版本差异。
         if (_searchDebounce is null)
         {
@@ -1286,17 +1312,69 @@ public sealed partial class BrowserPage : Page
             _searchDebounce.Tick += (_, _) => _ = ApplySearchAsync();
         }
 
+        // 顺手把标签建议填上：图库里已有的标签里，包含这几个字的都列出来。
+        // 标签表就几十行，同步查一把毫秒级，不值得为它上异步。
+        // 查不到（索引不可用/没有匹配）就给 null，不弹列表。
+        string text = (sender.Text ?? string.Empty).Trim();
+        var svc = LibraryIndexService.Shared;
+
+        if (text.Length == 0 || !svc.Available)
+        {
+            sender.ItemsSource = null;
+        }
+        else
+        {
+            var suggestions = svc.AllTags()
+                .Where(t => t.Tag.Contains(text, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(t => t.Count)
+                .Take(6)
+                .Select(t => (object)new TagSuggestion(t.Tag, t.Count))
+                .ToList();
+
+            sender.ItemsSource = suggestions.Count > 0 ? suggestions : null;
+        }
+
         _searchDebounce.Stop();
         _searchDebounce.Start();
     }
 
     /// <summary>搜索框里按回车：不等防抖，立刻查。</summary>
     private void SearchBox_QuerySubmitted(AutoSuggestBox sender, AutoSuggestBoxQuerySubmittedEventArgs args)
-        => _ = ApplySearchAsync();
+    {
+        // 点了建议列表里的标签 → 按标签筛，搜索词清掉（两条筛选线不混着记账）。
+        // 防抖定时器还挂着的话要掐掉，不然 320ms 后它一响又把标签筛冲掉。
+        if (args.ChosenSuggestion is TagSuggestion chosen)
+        {
+            _searchDebounce?.Stop();
+            _tagFilter = chosen.Tag;
+            _searchText = string.Empty;
+
+            _groupValue = null;
+            _ = SwitchToIndexModeAsync();
+            return;
+        }
+
+        _ = ApplySearchAsync();
+    }
+
+    /// <summary>建议列表里的一项：标签名 + 打了这个标签的图有多少张。</summary>
+    private sealed class TagSuggestion
+    {
+        public TagSuggestion(string tag, int count) { Tag = tag; Count = count; }
+
+        public string Tag { get; }
+        public int Count { get; }
+
+        // AutoSuggestBox 没配 ItemTemplate 时直接拿 ToString 当显示文本
+        public override string ToString() => $"{Tag}　（{Count} 张）";
+    }
 
     private async Task ApplySearchAsync()
     {
         _searchText = (SearchBox.Text ?? string.Empty).Trim();
+
+        // 搜索框清空 = 全部重来：搜索词和标签筛一起撤
+        if (string.IsNullOrWhiteSpace(_searchText)) _tagFilter = null;
 
         // 搜索框清空 + 按文件夹 = 回到原来那条直接读磁盘的路
         if (!IndexMode)

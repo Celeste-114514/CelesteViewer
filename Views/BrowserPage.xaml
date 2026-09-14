@@ -118,15 +118,19 @@
                         -->
                         <!--
                           用 AutoSuggestBox 而不是 TextBox：白送一个放大镜图标和
-                          一键清除的 ×，不用自己画。不给 ItemsSource 就不会弹建议列表，
-                          在这里它只是个长得像搜索框的输入框。
+                          一键清除的 ×。
+                          建议列表用来放标签：敲几个字，图库里已有的标签出现在下面，
+                          点一个就按标签筛（不用记自己起过哪些名字）。
+                          UpdateTextOnSelect 必须关掉 —— 默认会把选中项的文字填回输入框，
+                          那样"框里的字"和"正在生效的筛选"就成两笔账了。
                           注意别写 QueryIcon="Find" —— WinUI3 里它是 IconElement，
                           塞字符串会让 XamlCompiler 内部空引用崩（报错落在 .targets 上，
                           看不出是这一行的锅），默认的放大镜本来就是 Find。
                         -->
                         <AutoSuggestBox x:Name="SearchBox"
-                                        PlaceholderText="搜索文件名 / 相机 / 镜头"
+                                        PlaceholderText="搜索文件名 / 相机 / 镜头 / 标签"
                                         FontSize="12.5"
+                                        UpdateTextOnSelect="False"
                                         TextChanged="SearchBox_TextChanged"
                                         QuerySubmitted="SearchBox_QuerySubmitted"/>
                     </StackPanel>
