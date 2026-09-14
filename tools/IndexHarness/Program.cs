@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using CelesteViewer.Services;
+using ImageMagick;
 
 namespace CelesteViewer.IndexHarness;
 
@@ -28,8 +29,16 @@ internal static class Program
         if (!ok) _fail++;
     }
 
-    private static async Task<int> Main()
+    private static async Task<int> Main(string[] args)
     {
+        // 诊断模式：让 Magick 逐个试真文件，把"它猜不出格式"的全揪出来。
+        // 平时不跑（慢），只有排查解码异常时才手动加这个参数。
+        if (args.Any(a => a == "--scan-magick"))
+        {
+            await MagickScan();
+            return 0;
+        }
+
         string db = Path.Combine(Path.GetTempPath(), "cvidx-test.db");
         try { File.Delete(db); } catch { }
         try { File.Delete(db + "-wal"); } catch { }
@@ -39,6 +48,7 @@ internal static class Program
         await SyntheticAsync(db);
         NaturalSort();
         await Signature();
+        await MagickFallback();
 
         Console.WriteLine();
         Console.WriteLine(_fail == 0 ? "==== 全部通过 ====" : $"==== 有 {_fail} 项失败 ====");
@@ -636,4 +646,254 @@ internal static class Program
 
         await Task.CompletedTask;
     }
+
+    // ========= E. 兜底解码器（no decode delegate 的回归测试） =========
+
+    /// <summary>
+    /// 2026-09-15 那个 `no decode delegate for this image format ''` 的回归测试。
+    ///
+    /// 以前的处理是"catch 住别崩"，结果每遇到一个可疑文件调试器就中断一次，
+    /// 用户只能把堆栈贴过来问。根治之后必须钉死一条底线：
+    ///     **任何文件交到 Magick 手上，都不能再抛这种异常。**
+    ///
+    /// 分两段：
+    ///   E1. 造几个"曾经必炸"的文件，逐个验它安静地返回 null（不抛、不硬撑）
+    ///   E2. 再扫一遍真机上的图片，确认没有漏网的
+    /// </summary>
+    private static async Task MagickFallback()
+    {
+        Console.WriteLine();
+        Console.WriteLine("==== E. 兜底解码器（no decode delegate 回归测试）====");
+        Console.WriteLine();
+
+        var decoder = new MagickImageDecoder();
+        string dir = Path.Combine(Path.GetTempPath(), "cv-magick-test");
+        try { Directory.CreateDirectory(dir); } catch { }
+
+        // ---- E1-0. 真图必须照常解出来 ----
+        // 这条是防"为了不抛异常，干脆把好图也一起挡了"那种过度修复。
+        string png = Path.Combine(dir, "real.png");
+        using (var img = new MagickImage(MagickColors.SkyBlue, 32, 24))
+            img.Write(png, MagickFormat.Png);
+
+        var good = await decoder.ProbeAsync(png);
+        Check("真 PNG 能正常解出尺寸", good is { PixelWidth: 32, PixelHeight: 24 },
+              good is null ? "（返回 null —— 误杀了）" : $"{good.PixelWidth}x{good.PixelHeight}");
+
+        // ---- E1-1. 扩展名 .png、内容是一行文本 ----
+        // 就是用户 Downloads 里那批 ffmpeg md5 校验清单，第一轮修复的靶子。
+        string fake = Path.Combine(dir, "checksum.png");
+        await File.WriteAllTextAsync(fake, "d41d8cd98f00b204e9800998ecf8427e  out.png\n");
+        Check("文本文件伪装成 .png：安静放弃",
+              await QuietNull(decoder, fake));
+
+        // ---- E1-2. ICO 头 + 这个构建没 ICO 委托 ----
+        // 用户机器上一抓 236 个（MusicPlayer 源码里的图标），第二轮修复的靶子。
+        string ico = Path.Combine(dir, "icon.ico");
+        File.WriteAllBytes(ico, Head(0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x10, 0x10));
+        Check("ICO 头但 Magick 没这委托：主动放弃",
+              await QuietNull(decoder, ico));
+
+        // ---- E1-3. 认不出的二进制 + 认不出的扩展名 ----
+        // 旧代码正是从这里把裸流丢给 Magick 去猜，才炸出空格式名异常。
+        string junk = Path.Combine(dir, "mystery.xyz");
+        File.WriteAllBytes(junk, Head(0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88));
+        Check("认不出格式：绝不裸流丢给 Magick",
+              await QuietNull(decoder, junk));
+
+        // ---- E1-4. 空文件 / SVG ----
+        string empty = Path.Combine(dir, "empty.png");
+        File.WriteAllBytes(empty, Array.Empty<byte>());
+        Check("0 字节文件：安静放弃", await QuietNull(decoder, empty));
+
+        string svg = Path.Combine(dir, "vector.svg");
+        await File.WriteAllTextAsync(svg, "<svg xmlns=\"http://www.w3.org/2000/svg\"/>");
+        Check("SVG：一次都不试", await QuietNull(decoder, svg));
+
+        // ---- E1-5. 扩展名标错但文件头对（.jpg 里装的是 PNG）----
+        // 验"文件头兜底"那条路径没被上面几道闸门一起挡死。
+        string mis = Path.Combine(dir, "mislabeled.jpg");
+        File.Copy(png, mis, true);
+        var misInfo = await decoder.ProbeAsync(mis);
+        Check("扩展名标错、文件头对：仍按文件头解出来",
+              misInfo is { PixelWidth: 32, PixelHeight: 24 },
+              misInfo is null ? "（返回 null —— 误杀了）" : $"{misInfo.PixelWidth}x{misInfo.PixelHeight}");
+
+        try { Directory.Delete(dir, true); } catch { }
+
+        // ---- E2. 真机上的图片再扫一遍（限量，别把测试拖慢）----
+        var r = await ScanWithMagick(300);
+        Console.WriteLine($"  （真机扫描：{r.Scanned} 个图片文件，嗅探放行 {r.Allowed}，" +
+                          $"解出 {r.Ok}，主动放弃 {r.GaveUp}）");
+        Check("真机上再也没有文件让 Magick 抛异常", r.Threw == 0,
+              r.Threw == 0 ? "" : $"还有 {r.Threw} 个：" + string.Join("、", r.Samples.Take(3)));
+        Check("真机扫描没有误杀（放行了的图里有能解出来的）",
+              r.Allowed == 0 || r.Ok > 0, $"放行 {r.Allowed} / 解出 {r.Ok}");
+    }
+
+    /// <summary>
+    /// 要求解码器"安静地返回 null"：既不抛异常，也不硬解出一个东西来。
+    /// 抛任何异常都算失败 —— 这条正是回归测试要守的底线。
+    /// </summary>
+    private static async Task<bool> QuietNull(MagickImageDecoder decoder, string path)
+    {
+        try { return await decoder.ProbeAsync(path) is null; }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// 全量诊断：扫真实图库，逐个问 Magick"这文件你认得吗"，把认不出来的全列出来。
+    /// 平时不跑（慢），排查解码异常时手动加 --scan-magick。
+    /// </summary>
+    private static async Task MagickScan()
+    {
+        var r = await ScanWithMagick(0);
+
+        Console.WriteLine("==== Magick 格式探测诊断 ====");
+        Console.WriteLine();
+        Console.WriteLine($"扫描图片文件        : {r.Scanned}");
+        Console.WriteLine($"嗅探放行（像图）    : {r.Allowed}");
+        Console.WriteLine($"**仍然抛异常**     : {r.Threw}   ← 必须是 0");
+        Console.WriteLine($"解出尺寸（没误杀）  : {r.Ok}");
+        Console.WriteLine($"解码器主动放弃      : {r.GaveUp}");
+        Console.WriteLine();
+
+        if (r.GaveUp > 0)
+        {
+            Console.WriteLine("主动放弃的按扩展名（ICO 是预期的：Magick 没这委托；别的格式要留意）：");
+            foreach (var kv in r.NullByExt.OrderByDescending(k => k.Value))
+                Console.WriteLine($"  {kv.Key,-8} {kv.Value} 个");
+            Console.WriteLine();
+        }
+
+        if (r.Threw > 0)
+        {
+            Console.WriteLine("抛异常的文件：");
+            foreach (var kv in r.ThrewByExt.OrderByDescending(k => k.Value))
+                Console.WriteLine($"  {kv.Key,-8} {kv.Value} 个");
+            Console.WriteLine();
+            foreach (string s in r.Samples) Console.WriteLine(s);
+        }
+    }
+
+    private sealed record MagickScanResult(
+        int Scanned, int Allowed, int Threw, int Ok, int GaveUp,
+        Dictionary<string, int> NullByExt,
+        Dictionary<string, int> ThrewByExt,
+        List<string> Samples);
+
+    /// <summary>
+    /// 扫真机图片目录，逐个走一遍完整的 MagickImageDecoder 链路。
+    /// </summary>
+    /// <param name="maxFiles">最多扫几个文件；0 = 不限（全量诊断用）。</param>
+    private static async Task<MagickScanResult> ScanWithMagick(int maxFiles)
+    {
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var roots = new[]
+        {
+            Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+            Environment.GetFolderPath(Environment.SpecialFolder.MyPictures),
+            Path.Combine(home, "Downloads"),
+        };
+
+        var exts = new HashSet<string>(
+            ImageFormats.Common.Concat(ImageFormats.Extended),
+            StringComparer.OrdinalIgnoreCase);
+
+        var decoder = new MagickImageDecoder();
+
+        int scanned = 0, allowed = 0, threw = 0, probedAsImage = 0, gaveUp = 0;
+        var samples = new List<string>();
+        var byExt = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var byExtNull = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (string root in roots)
+        {
+            if (!Directory.Exists(root))
+            {
+                Console.WriteLine($"（目录不存在）{root}");
+                continue;
+            }
+
+            // 枚举可能因权限/长路径中断，逐个目录容错
+            var queue = new Stack<string>();
+            queue.Push(root);
+            while (queue.Count > 0)
+            {
+                string dir = queue.Pop();
+                IEnumerable<string> files;
+                try { files = Directory.EnumerateFiles(dir); }
+                catch { continue; }
+
+                foreach (string file in files)
+                {
+                    if (!exts.Contains(Path.GetExtension(file))) continue;
+                    scanned++;
+
+                    if (maxFiles > 0 && scanned > maxFiles) return Build(scanned, allowed, threw,
+                        probedAsImage, gaveUp, byExtNull, byExt, samples);
+
+                    try
+                    {
+                        byte[] head = new byte[64];
+                        int n;
+                        using (var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read))
+                            n = fs.Read(head, 0, head.Length);
+
+                        if (!FileSignature.LooksLikeImage(head.AsSpan(0, n))) continue;
+                        allowed++;
+
+                        // 走**修复后的完整链路**：MagickImageDecoder 自己。
+                        // 直接 new MagickImageInfo 会把修复绕过去，验证不到东西。
+                        try
+                        {
+                            var info = await decoder.ProbeAsync(file);
+                            if (info is not null) probedAsImage++;
+                            else
+                            {
+                                // 解码器主动放弃：要么 Magick 没这格式的委托（预期，比如 ICO），
+                                // 要么文件本身坏了。按扩展名分开记，才能看出有没有误杀。
+                                gaveUp++;
+                                string e2 = Path.GetExtension(file);
+                                byExtNull[e2] = byExtNull.TryGetValue(e2, out int c2) ? c2 + 1 : 1;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            threw++;
+                            string ext = Path.GetExtension(file);
+                            byExt[ext] = byExt.TryGetValue(ext, out int c) ? c + 1 : 1;
+
+                            if (samples.Count < 30)
+                            {
+                                long size = new FileInfo(file).Length;
+                                string msg = ex.Message.Replace("\r", " ").Replace("\n", " ");
+                                if (msg.Length > 60) msg = msg[..60];
+                                samples.Add($"  {ext,-6} {size,9} B  {file}\n           {msg}");
+                            }
+                        }
+                    }
+                    catch { /* 读不动的文件跟本次排查无关 */ }
+                }
+
+                try
+                {
+                    foreach (string sub in Directory.EnumerateDirectories(dir))
+                    {
+                        string name = Path.GetFileName(sub);
+                        if (name.StartsWith('.') || name.StartsWith('$')) continue;
+                        queue.Push(sub);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        return Build(scanned, allowed, threw, probedAsImage, gaveUp, byExtNull, byExt, samples);
+    }
+
+    private static MagickScanResult Build(
+        int scanned, int allowed, int threw, int ok, int gaveUp,
+        Dictionary<string, int> byExtNull, Dictionary<string, int> byExt, List<string> samples)
+        => new(scanned, allowed, threw, ok, gaveUp, byExtNull, byExt, samples);
 }
