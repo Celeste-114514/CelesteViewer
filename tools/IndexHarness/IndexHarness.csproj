@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- 和 CelesteViewer.Core 同一个 TFM，否则引用不了它 -->
+    <TargetFramework>net9.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <WindowsSdkPackageVersion>10.0.26100.87</WindowsSdkPackageVersion>
+    <Platforms>x64</Platforms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>CelesteViewer.IndexHarness</RootNamespace>
+    <AssemblyName>IndexHarness</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!--
+    这是个**验证工具**，不是产品的一部分。
+
+    存在的理由：图库索引一旦接进界面，改任何东西都可能悄悄影响几万张图的
+    查询结果，靠手点几下根本看不出来。这个程序让机器给答案：
+    扫真实文件验功能对不对，再灌合成数据验规模撑不撑得住。
+
+    跑法（命令行，x64）：
+      cd tools\IndexHarness
+      dotnet run -c Debug -p:Platform=x64
+
+    全绿就说明索引层没被改坏。改了 MediaIndex 之后请务必跑一遍。
+  -->
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\CelesteViewer.Core\CelesteViewer.Core.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -145,6 +145,27 @@
   </ItemGroup>
 
   <!--
+    ===== 同样必须排除 tools\ =====
+
+    tools\IndexHarness 是一个独立的可执行验证工具（有自己的 csproj 和 Main）。
+    主项目的源码通配是 **/*.cs，不排除的话它会把 IndexHarness 的 Program.cs
+    也一起编译进来 —— 于是主程序里多出一个 Main，和 WinUI 的入口打架。
+
+    和上面 CelesteViewer.Core 那段是同一个坑的不同版本：只要往主项目目录里
+    放了"另一个项目"，就必须在这里加一条排除。
+  -->
+  <ItemGroup>
+    <Compile Remove="tools\**\*.cs" />
+    <None Remove="tools\**" />
+    <Content Remove="tools\**" />
+    <Page Remove="tools\**" />
+    <PRIResource Remove="tools\**" />
+    <EmbeddedResource Remove="tools\**" />
+    <ApplicationDefinition Remove="tools\**" />
+    <Manifest Remove="tools\**" />
+  </ItemGroup>
+
+  <!--
     Defining the "HasPackageAndPublishMenuAddedByProject" property here allows the Solution
     Explorer "Package and Publish" context menu entry to be enabled for this project even if
     the Windows App SDK Nuget package has not yet been restored.

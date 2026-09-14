@@ -58,5 +58,21 @@
 
     <!-- 压缩包里直接看图（zip / cbz / 7z）。RAR 是非自由格式，不打算支持 -->
     <PackageReference Include="SharpCompress" Version="1.0.0" />
+
+    <!--
+      图库索引库。
+
+      为什么需要它：光靠"打开哪个目录就扫哪个目录"，图库就只能按文件夹分。
+      要能"搜 2025 年用某支镜头拍的照片""按日期归组"，必须先把整个图库的
+      元数据落到一张表里，之后所有分类维度都是对这张表的不同查法。
+
+      选 Microsoft.Data.Sqlite 而不是自己写 JSON / 二进制：
+        - 它是微软官方的薄封装，纯托管 + 一个 native SQLitePCLRaw，体积很小
+        - 查询、排序、分组全都交给 SQLite，不用自己写内存里筛几万条的循环
+        - 增量更新（只重扫改过的文件）用 upsert 一条语句就够
+
+      和 MusicPlayer 的曲库是同一条路子，将来三合一合并时两边可以对齐。
+    -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.10" />
   </ItemGroup>
 </Project>
