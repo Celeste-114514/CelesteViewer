@@ -89,6 +89,24 @@
                        Foreground="#66FFFFFF"/>
         </Grid>
 
+        <!--
+          ===== 右上角图片格式角标（JPG / PNG / WEBP …）=====
+
+          浏览时显示，空状态 / 放映时隐藏。
+          位置压在标题栏下方一点、贴右但不碰到系统按钮（右间距 14，
+          系统按钮约占右侧 140 宽那一块，而且只在 y 0~44 这截，这里 y 从 52 起不重叠）。
+        -->
+        <Border x:Name="FormatBadge"
+                VerticalAlignment="Top" HorizontalAlignment="Right"
+                Margin="0,52,14,0"
+                Background="#B31F1F1F" BorderBrush="#33FFFFFF" BorderThickness="1"
+                CornerRadius="11" Padding="10,4"
+                Visibility="Collapsed">
+            <TextBlock x:Name="FormatText"
+                       FontSize="12" FontWeight="SemiBold"
+                       Foreground="#EEFFFFFF" VerticalAlignment="Center"/>
+        </Border>
+
         <!-- ===== 空状态：还没打开任何图片时 ===== -->
         <StackPanel x:Name="EmptyState"
                     HorizontalAlignment="Center"

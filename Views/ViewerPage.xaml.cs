@@ -280,6 +280,24 @@ public sealed partial class ViewerPage : Page
         await ShowCurrentAsync();
     }
 
+    /// <summary>
+    /// 右上角格式角标：按当前图片的扩展名显示（JPG / PNG / WEBP …）。
+    /// 没图（或拿不到扩展名）就藏起来。放映退出后也会回来（见 ExitSlideMode）。
+    /// </summary>
+    private void UpdateFormatBadge()
+    {
+        var label = FormatLabelOf(_index?.CurrentPath);
+        FormatText.Text = label;
+        FormatBadge.Visibility = label.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private static string FormatLabelOf(string? path)
+    {
+        if (string.IsNullOrEmpty(path)) return "";
+        var ext = System.IO.Path.GetExtension(path);
+        return ext.Length > 1 ? ext.Substring(1).ToUpperInvariant() : "";
+    }
+
     private async Task ShowCurrentAsync()
     {
         // 换图就退出裁剪：选框是按"这一张"算的，换张图还留着毫无意义
@@ -306,6 +324,7 @@ public sealed partial class ViewerPage : Page
         CounterText.Text = _index.Count > 0 ? $"{_index.Position} / {_index.Count}" : "";
         SlideCounterText.Text = CounterText.Text;
         EmptyState.Visibility = Visibility.Collapsed;
+        UpdateFormatBadge();
 
         // 文字面板里的结果是**上一张**的，留着会误导 —— 换图就收起来，
         // 想看新图上的字再按一次 T
@@ -546,6 +565,7 @@ public sealed partial class ViewerPage : Page
         TitleText.Text = "";
         TitleDot.Visibility = Visibility.Collapsed;
         SizeText.Text = "";
+        FormatBadge.Visibility = Visibility.Collapsed;
         CounterText.Text = "";
         EmptyText.Text = message;
         EmptyState.Visibility = Visibility.Visible;
@@ -2042,6 +2062,7 @@ public sealed partial class ViewerPage : Page
         // 收起"工具"，只留画面
         TitleBar.Visibility = Visibility.Collapsed;
         BottomBar.Visibility = Visibility.Collapsed;
+        FormatBadge.Visibility = Visibility.Collapsed;
         SlideLayer.Visibility = Visibility.Visible;
 
         UpdateSlideIntervalButtons();
@@ -2075,6 +2096,7 @@ public sealed partial class ViewerPage : Page
         SlideBar.Opacity = 1;        // 复位，下次放映第一帧就是看得见的
         TitleBar.Visibility = Visibility.Visible;
         BottomBar.Visibility = Visibility.Visible;
+        UpdateFormatBadge();         // 还在看图就把它亮回来（放映期间藏了）
 
         if (!_slideWasFullScreen) SafeHost?.ToggleFullScreen();
 
@@ -2615,6 +2637,11 @@ public sealed partial class ViewerPage : Page
 
         UpdateSelectChrome();
 
+        // 底栏先让位：裁剪 / 擦除自己的工具条也贴底（CropToolbar 和 BottomBar 同高同位置），
+        // 两条半透明叠一起又脏又点不着。退出时把状态原样还回去
+        _barBeforeCrop = BottomBar.Visibility;
+        BottomBar.Visibility = Visibility.Collapsed;
+
         CropLayer.Visibility = Visibility.Visible;
         CropLayer.UpdateLayout();
         CropLayer.SetShape(null);
@@ -2658,6 +2685,9 @@ public sealed partial class ViewerPage : Page
         _cropGrip = -1;
         CropLayer.Visibility = Visibility.Collapsed;
         CropLayer.SetShape(null);
+
+        // 把进模式时藏起来的底栏还回去（取消 / 应用 / 翻页 / Esc 都走这儿）
+        BottomBar.Visibility = _barBeforeCrop;
 
         try
         {
@@ -3345,6 +3375,9 @@ public sealed partial class ViewerPage : Page
     /// 两条叠在一起（还都是半透明）看着很脏，而且下面那条的按钮会被压住点不着。
     /// </summary>
     private Visibility _barBeforeMark = Visibility.Visible;
+
+    /// <summary>进裁剪 / 擦除模式前的底栏状态，退出时原样还回去（和标记 / 背景同套路）。</summary>
+    private Visibility _barBeforeCrop = Visibility.Visible;
 
     /// <summary>笔尖圆圈当前停在哪儿（标记层坐标）。NaN 表示还没定位过。</summary>
     private double _ringX = double.NaN;
