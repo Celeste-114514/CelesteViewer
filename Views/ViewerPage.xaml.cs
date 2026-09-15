@@ -210,6 +210,7 @@ public sealed partial class ViewerPage : Page
         _editBytes = null;
         _edits = new PhotoEdits();
         _rawDecoded = null;
+        UpdateEditChrome();
         ReleaseLookPixels();
     }
 
@@ -539,6 +540,9 @@ public sealed partial class ViewerPage : Page
         _displayWidth = 0;
         _displayHeight = 0;
         _editBytes = null;
+        _edits = new PhotoEdits();
+        _rawDecoded = null;
+        UpdateEditChrome();
         TitleText.Text = "";
         TitleDot.Visibility = Visibility.Collapsed;
         SizeText.Text = "";
