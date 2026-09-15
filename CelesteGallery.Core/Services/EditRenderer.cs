@@ -37,7 +37,7 @@ public static class EditRenderer
         // 数据本身不完整就什么都别做（宁可显示原图，也不能把画面算成垃圾）
         if (w <= 0 || h <= 0 || pixels.Length < (long)w * h * 4) return source;
 
-        // 翻转和调色都是**原地**改数组的，而旋转 / 裁剪会新建数组。
+        // 翻转是**原地**改数组的，而旋转 / 裁剪会新建数组。
         // 于是这里必须盯住一件事：手里的数组到底是不是调用方那份原图？
         // 是的话，动它之前先拷一份 —— 不然"非破坏性"就是一句空话。
         // （2026-09-16 单测抓到过：只调色不改几何时，原图被就地改掉了。）
@@ -52,8 +52,11 @@ public static class EditRenderer
         // 2) 裁剪（坐标是"几何变换之后"那张图的，归一化）
         if (e.HasCrop) (pixels, w, h) = Crop(pixels, w, h, e);
 
-        // 3) 调色（放在最后：它作用在最终取景上）
-        if (e.HasTone) Tone(pixels = Own(pixels), e, source.Premultiplied);
+        // 3) 调色（放在最后：它作用在最终取景上）。
+        //
+        // 直接调 PhotoLook —— 查看器"调整"面板走的是同一个函数，
+        // 所以"面板里预览的样子"和"存下来再打开的样子"必然一致。
+        if (e.HasTone) pixels = ApplyTone(pixels, w, h, e.Look, source);
 
         return new DecodedBitmap
         {
@@ -235,77 +238,99 @@ public static class EditRenderer
     // ===== 调色 =====
 
     /// <summary>
-    /// 亮度 / 对比度 / 饱和度 / 色温（<paramref name="px"/> **原地**改，
-    /// 调用方保证这个数组是 Apply 自己拷出来的那份）。
+    /// 调色。逻辑本体在 <see cref="PhotoLook"/>，这里只处理**预乘 alpha** 这一个坑。
     ///
-    /// 亮度 + 对比度是**逐通道的一元函数**，所以预计算一张 256 项的查找表，
-    /// 每个像素只查三次表，不做浮点乘除 —— 400 万像素的图也就几十毫秒。
-    /// 饱和度要跨通道（先算灰度），色温要分别动红和蓝，只能逐像素算，但都是整数运算。
+    /// 坑是这样的：WIC 解码器（主路径）吐出来的像素是**预乘**的 ——
+    /// 每个颜色分量已经乘过 alpha。对这种图直接改 RGB，RGB 和 alpha 就对不上了，
+    /// 半透明的边缘立刻出现一圈黑边 / 白边。
     ///
-    /// <paramref name="premultiplied"/> 为真时**跳过半透明像素**：
-    /// 预乘 alpha 的图里 RGB 已经乘过 alpha，单独改 RGB 会让它和 alpha 对不上，
-    /// 边缘立刻出现一圈脏色。这种图很少（WIC 解出来的半透明 PNG），
-    /// 跳过比算错强。
+    /// 处理办法：先"反预乘"把颜色还原成真实值，调完再乘回去。
+    /// **只有确实存在半透明像素时才走这条路** —— 照片的绝大多数是全不透明的，
+    /// 那种情况一次扫描就跳过，代价可以忽略。
     /// </summary>
-    private static void Tone(byte[] px, PhotoEdits e, bool premultiplied)
+    private static byte[] ApplyTone(
+        byte[] pixels, int w, int h, LookSettings look, DecodedBitmap source)
     {
-        // ---- 亮度 + 对比度：查表 ----
-        var lut = new byte[256];
+        // 动手改之前先确认这份数组是自己的。
+        // （只调色、没做任何几何变换时，pixels 到现在还指着调用方的原图。）
+        byte[] Own(byte[] p) => ReferenceEquals(p, source.Pixels) ? (byte[])p.Clone() : p;
 
-        // 对比度：-100 压成一片中灰，0 不变，+100 斜率翻倍
-        double slope = 1.0 + (e.Contrast / 100.0);
-
-        // 亮度：-100 → -255，+100 → +255（实际会被 clamp 收住，够用）
-        double offset = e.Brightness * 2.55;
-
-        for (int i = 0; i < 256; i++)
+        if (source.Premultiplied && HasTranslucent(pixels, w, h))
         {
-            double v = (i - 128) * slope + 128 + offset;
-            lut[i] = (byte)Math.Clamp((int)Math.Round(v), 0, 255);
+            byte[] working = Own(pixels);
+            UnPremultiply(working, w, h);
+
+            byte[] toned = PhotoLook.Apply(working, w, h, look);
+            if (!ReferenceEquals(toned, working)) working = toned;
+
+            Premultiply(working, w, h);
+            return working;
         }
 
-        // ---- 饱和度：-100 = 全灰，0 = 不变，+100 = 饱和度翻倍 ----
-        double sat = 1.0 + (e.Saturation / 100.0);
-        bool doSat = Math.Abs(sat - 1.0) > 1e-9;
+        byte[] result = PhotoLook.Apply(pixels, w, h, look);
 
-        // ---- 色温：±100 映射到 ±50 个色阶（再多就开始明显偏色了）----
-        int warm = (int)Math.Round(e.Temperature * 0.5);
-        bool doWarm = warm != 0;
+        // PhotoLook 自己会新建数组（不动入参）。万一它在某种情况下把原数组
+        // 原样返回（像素长度对不上时就会），这里不能把调用方的原图当成结果交出去 ——
+        // 调用方以为拿到的是"编辑后的新图"，回头再改它就会改到原图。
+        return ReferenceEquals(result, source.Pixels) ? (byte[])result.Clone() : result;
+    }
 
-        for (int i = 0; i < px.Length; i += 4)
+    /// <summary>
+    /// 图里有没有**半透明**像素（alpha 落在 1~254 之间）。
+    /// 全 0 和全 255 都不算：全透明像素 PhotoLook 会原样搬走，全不透明压根没有预乘问题。
+    /// </summary>
+    private static bool HasTranslucent(byte[] px, int w, int h)
+    {
+        int n = w * h;
+
+        for (int i = 0; i < n; i++)
         {
-            byte alpha = px[i + 3];
+            byte a = px[i * 4 + 3];
+            if (a != 0 && a != 255) return true;
+        }
 
-            // 全透明像素的 RGB 是垃圾值（解码器不保证是什么），调了也没人看见
-            if (alpha == 0) continue;
+        return false;
+    }
 
-            // 预乘 alpha 的半透明像素不能单独改 RGB，见方法注释
-            if (premultiplied && alpha != 255) continue;
+    /// <summary>
+    /// 预乘 → 直通：<c>存的值 = 真实颜色 × alpha / 255</c>，反过来就是除回去。
+    ///
+    /// 除法会有 1~2 级的舍入误差，但和"半透明边缘一整圈黑边"比起来，
+    /// 轻重完全不成比例。
+    /// </summary>
+    private static void UnPremultiply(byte[] px, int w, int h)
+    {
+        int n = w * h;
 
-            int b = lut[px[i]];
-            int g = lut[px[i + 1]];
-            int r = lut[px[i + 2]];
+        for (int i = 0; i < n; i++)
+        {
+            int o = i * 4;
+            int a = px[o + 3];
 
-            if (doSat)
-            {
-                // Rec.601 亮度，和直方图那边同一套整数系数 —— 保持一致，
-                // 不然"直方图看着灰、图上却彩"这种对不上会很难解释
-                int gray = (77 * r + 150 * g + 29 * b) >> 8;
+            // 全透明（没有颜色可言）和全不透明（等于乘 1）都不用换算
+            if (a == 0 || a == 255) continue;
 
-                r = (int)Math.Round(gray + (r - gray) * sat);
-                g = (int)Math.Round(gray + (g - gray) * sat);
-                b = (int)Math.Round(gray + (b - gray) * sat);
-            }
+            px[o] = (byte)Math.Min(255, px[o] * 255 / a);
+            px[o + 1] = (byte)Math.Min(255, px[o + 1] * 255 / a);
+            px[o + 2] = (byte)Math.Min(255, px[o + 2] * 255 / a);
+        }
+    }
 
-            if (doWarm)
-            {
-                r += warm;
-                b -= warm;
-            }
+    /// <summary>直通 → 预乘：见 <see cref="UnPremultiply"/>，这是它的逆运算。</summary>
+    private static void Premultiply(byte[] px, int w, int h)
+    {
+        int n = w * h;
 
-            px[i] = (byte)Math.Clamp(b, 0, 255);
-            px[i + 1] = (byte)Math.Clamp(g, 0, 255);
-            px[i + 2] = (byte)Math.Clamp(r, 0, 255);
+        for (int i = 0; i < n; i++)
+        {
+            int o = i * 4;
+            int a = px[o + 3];
+
+            if (a == 0 || a == 255) continue;
+
+            px[o] = (byte)(px[o] * a / 255);
+            px[o + 1] = (byte)(px[o + 1] * a / 255);
+            px[o + 2] = (byte)(px[o + 2] * a / 255);
         }
     }
 }

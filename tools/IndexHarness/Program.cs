@@ -133,7 +133,37 @@ internal static class Program
     // ==================== K. 非破坏性编辑（路线图第 6 步） ====================
 
     /// <summary>
-    /// 造一张"每像素 R 通道 = 序号（从 1 起）"的图。
+    /// 调色参数的简写构造。调色复用查看器"调整"面板那套
+    /// <see cref="LookSettings"/>（10 项滑块 + 5 个滤镜专用项 + 黑白模式），
+    /// 全填一遍要写二十来行，测试里这么写根本看不清重点。
+    /// </summary>
+    private static LookSettings Tone(
+        int brightness = 0, int exposure = 0, int contrast = 0,
+        int saturation = 0, int warmth = 0, int highlights = 0,
+        int shadows = 0, int vignette = 0, int tint = 0, int clarity = 0,
+        double fade = 0, double grain = 0, double split = 0,
+        double blackLift = 0, double whiteDrop = 0, MonoMode mono = MonoMode.None)
+        => new()
+        {
+            Brightness = brightness,
+            Exposure = exposure,
+            Contrast = contrast,
+            Saturation = saturation,
+            Warmth = warmth,
+            Highlights = highlights,
+            Shadows = shadows,
+            Vignette = vignette,
+            Tint = tint,
+            Clarity = clarity,
+            Fade = fade,
+            Grain = grain,
+            Split = split,
+            BlackLift = blackLift,
+            WhiteDrop = whiteDrop,
+            Mono = mono,
+        };
+
+    /// <summary>造一张"每像素 R 通道 = 序号（从 1 起）"的图。
     /// 用来验证旋转 / 翻转 / 裁剪有没有把像素搬到正确的格子上 ——
     /// 用纯色图是测不出来的（搬错位置也是同一个颜色）。
     /// </summary>
@@ -289,7 +319,7 @@ internal static class Program
             CropY = 0.1,
             CropW = 0.5,
             CropH = 0.5,
-            Brightness = 20,
+            Look = Tone(brightness: 20),
         });
         Check("非破坏性：Apply 之后调用方的像素数组完全没动", original.SequenceEqual(snapshot));
 
@@ -300,7 +330,7 @@ internal static class Program
         //   已经被改过的数组，减暗于是"没反应"。）
         byte[] toneOnly = MakeBgra(8, 8, 128, 128, 128);
         byte[] toneSnapshot = (byte[])toneOnly.Clone();
-        EditRenderer.Apply(Bmp(toneOnly, 8, 8), new PhotoEdits { Brightness = 30 });
+        EditRenderer.Apply(Bmp(toneOnly, 8, 8), new PhotoEdits { Look = Tone(brightness: 30) });
         Check("非破坏性：只调色（无任何几何变换）也不能改到原数组",
               toneOnly.SequenceEqual(toneSnapshot));
 
@@ -312,69 +342,107 @@ internal static class Program
         byte[] flipTone = MakeBgra(8, 8, 128, 128, 128);
         byte[] flipToneSnapshot = (byte[])flipTone.Clone();
         EditRenderer.Apply(Bmp(flipTone, 8, 8),
-                          new PhotoEdits { FlipV = true, Saturation = 40 });
+                          new PhotoEdits { FlipV = true, Look = Tone(saturation: 40) });
         Check("非破坏性：翻转 + 调色组合也不能改到原数组",
               flipTone.SequenceEqual(flipToneSnapshot));
 
         // ---- K8: 调色 ----
+        //
+        // 参数本体是 LookSettings（"调整"面板那套），实际计算在 PhotoLook.Apply。
+        // 这里验的是"参数能正确透到像素上"，以及和几何变换组合起来的结果。
         var gray = Bmp(MakeBgra(8, 8, 128, 128, 128), 8, 8);
-        var brighter = EditRenderer.Apply(gray, new PhotoEdits { Brightness = 20 });
+        var brighter = EditRenderer.Apply(gray, new PhotoEdits { Look = Tone(brightness: 20) });
         Check("亮度 +20：中灰 128 变亮", RAt(brighter, 0, 0) > 128, RAt(brighter, 0, 0).ToString());
 
-        var darker = EditRenderer.Apply(gray, new PhotoEdits { Brightness = -20 });
+        var darker = EditRenderer.Apply(gray, new PhotoEdits { Look = Tone(brightness: -20) });
         Check("亮度 -20：中灰 128 变暗", RAt(darker, 0, 0) < 128, RAt(darker, 0, 0).ToString());
 
-        // 对比度 -100 → 斜率 0 → 所有像素都被压成同一档（128）
+        // 对比度是 (v-0.5)*k+0.5，k = 1 + 参数/125。
+        // 所以 -100 是 k=0.2（往中间灰**收拢**），不是"压成一片纯灰"。
         var flat = EditRenderer.Apply(Bmp(MakeBgra(4, 4, 30, 128, 220), 4, 4),
-                                      new PhotoEdits { Contrast = -100 });
-        Check("对比度 -100：所有通道被压到同一档（128）",
-              RAt(flat, 0, 0) == 128 && flat.Pixels[0] == 128 && flat.Pixels[1] == 128,
-              $"{flat.Pixels[0]},{flat.Pixels[1]},{RAt(flat, 0, 0)}");
+                                      new PhotoEdits { Look = Tone(contrast: -100) });
+        Check("对比度 -100：明暗差距被压小（暗的抬、亮的压）",
+              flat.Pixels[0] > 30 && flat.Pixels[2] < 220,
+              $"B={flat.Pixels[0]} R={flat.Pixels[2]}");
 
-        // 饱和度 -100 → 全灰（R = G = B）
+        var punchy = EditRenderer.Apply(Bmp(MakeBgra(4, 4, 30, 128, 220), 4, 4),
+                                        new PhotoEdits { Look = Tone(contrast: 60) });
+        Check("对比度 +60：明暗差距被拉开（暗的更暗、亮的更亮）",
+              punchy.Pixels[0] < 30 && punchy.Pixels[2] > 220,
+              $"B={punchy.Pixels[0]} R={punchy.Pixels[2]}");
+
+        // 饱和度 -100 → PhotoLook 把系数夹到 0 → 三通道相等
         var mono = EditRenderer.Apply(Bmp(MakeBgra(4, 4, 30, 128, 220), 4, 4),
-                                      new PhotoEdits { Saturation = -100 });
+                                      new PhotoEdits { Look = Tone(saturation: -100) });
         Check("饱和度 -100：变成灰度（B = G = R）",
               mono.Pixels[0] == mono.Pixels[1] && mono.Pixels[1] == mono.Pixels[2],
               $"{mono.Pixels[0]},{mono.Pixels[1]},{mono.Pixels[2]}");
 
-        // 色温 +60 → 加红减蓝
+        // 暖度（色温）+60 → 加红减蓝
         var warm = EditRenderer.Apply(Bmp(MakeBgra(4, 4, 100, 100, 100), 4, 4),
-                                      new PhotoEdits { Temperature = 60 });
-        Check("色温 +60：R 变大、B 变小（偏暖）",
+                                      new PhotoEdits { Look = Tone(warmth: 60) });
+        Check("暖度 +60：R 变大、B 变小（偏暖）",
               warm.Pixels[2] > 100 && warm.Pixels[0] < 100,
               $"B={warm.Pixels[0]} R={warm.Pixels[2]}");
 
         var cool = EditRenderer.Apply(Bmp(MakeBgra(4, 4, 100, 100, 100), 4, 4),
-                                      new PhotoEdits { Temperature = -60 });
-        Check("色温 -60：R 变小、B 变大（偏冷）",
+                                      new PhotoEdits { Look = Tone(warmth: -60) });
+        Check("暖度 -60：R 变小、B 变大（偏冷）",
               cool.Pixels[2] < 100 && cool.Pixels[0] > 100,
               $"B={cool.Pixels[0]} R={cool.Pixels[2]}");
 
+        // 黑白模式（滑块上不出现，是滤镜预设用的那几项）
+        var bw = EditRenderer.Apply(Bmp(MakeBgra(4, 4, 30, 128, 220), 4, 4),
+                                    new PhotoEdits { Look = Tone(mono: MonoMode.Mono) });
+        Check("黑白模式：三通道相等",
+              bw.Pixels[0] == bw.Pixels[1] && bw.Pixels[1] == bw.Pixels[2],
+              $"{bw.Pixels[0]},{bw.Pixels[1]},{bw.Pixels[2]}");
+
         // ---- K9: 调色不许碰 alpha ----
         var withAlpha = EditRenderer.Apply(Bmp(MakeBgra(4, 4, 100, 100, 100, a: 200), 4, 4),
-                                           new PhotoEdits { Brightness = 50, Saturation = 50 });
+                                           new PhotoEdits { Look = Tone(brightness: 50, saturation: 50) });
         Check("调色不改 alpha（仍然是 200）", withAlpha.Pixels[3] == 200, withAlpha.Pixels[3].ToString());
 
         // ---- K10: 全透明像素不参与调色 ----
         var clear = EditRenderer.Apply(Bmp(MakeBgra(4, 4, 0, 0, 0, a: 0), 4, 4),
-                                       new PhotoEdits { Brightness = 100 });
+                                       new PhotoEdits { Look = Tone(brightness: 100) });
         Check("全透明像素：调色跳过（RGB 仍是 0）",
               clear.Pixels[0] == 0 && clear.Pixels[2] == 0);
 
-        // ---- K11: 预乘 alpha 的半透明像素跳过调色 ----
-        // 预乘的图里 RGB 已经乘过 alpha，单独改 RGB 会让边缘出现脏色
+        // ---- K11: 预乘 alpha（WIC 解码器主路径吐出来的就是这种）----
+        //
+        // 预乘像素里 RGB 已经乘过 alpha。对半透明像素直接调色会让 RGB 和 alpha
+        // 对不上，边缘出现一圈脏色 —— 所以引擎会"反预乘 → 调色 → 再预乘"。
+        //
+        // 期望值推导（alpha = 128、RGB = 40）：
+        //   反预乘    40 * 255 / 128            = 79
+        //   亮度 +80  lift = 0.0015 * 80 = 0.12
+        //             79/255 + 0.12 = 0.4298   → 110
+        //   再预乘    110 * 128 / 255           = 55
         var pre = EditRenderer.Apply(
             Bmp(MakeBgra(4, 4, 40, 40, 40, a: 128), 4, 4, premultiplied: true),
-            new PhotoEdits { Brightness = 80 });
-        Check("预乘 alpha 半透明像素：跳过调色（保持 40）",
-              pre.Pixels[2] == 40, pre.Pixels[2].ToString());
+            new PhotoEdits { Look = Tone(brightness: 80) });
+        Check("预乘图：alpha 没被改", pre.Pixels[3] == 128, pre.Pixels[3].ToString());
+        Check("预乘图：按“反预乘 → 调色 → 再预乘”算（40 → ≈55）",
+              Math.Abs(pre.Pixels[2] - 55) <= 2, pre.Pixels[2].ToString());
 
-        // 不透明像素在预乘模式下**应该**照常调色
-        var preOpaque = EditRenderer.Apply(
-            Bmp(MakeBgra(4, 4, 40, 40, 40, a: 255), 4, 4, premultiplied: true),
-            new PhotoEdits { Brightness = 80 });
-        Check("预乘 alpha 不透明像素：照常调色", preOpaque.Pixels[2] > 40, preOpaque.Pixels[2].ToString());
+        // 同样的输入**不打**预乘标记 —— 走另一条路（不反预乘），结果更亮
+        var straight = EditRenderer.Apply(
+            Bmp(MakeBgra(4, 4, 40, 40, 40, a: 128), 4, 4),
+            new PhotoEdits { Look = Tone(brightness: 80) });
+        Check("非预乘图：不做反预乘，直接调（40 → ≈71）",
+              straight.Pixels[2] > pre.Pixels[2],
+              $"非预乘 {straight.Pixels[2]} / 预乘 {pre.Pixels[2]}");
+
+        // 全不透明的图：预乘标记不该带来任何差别（也不该白跑一遍反预乘）
+        var opaquePre = EditRenderer.Apply(
+            Bmp(MakeBgra(4, 4, 80, 80, 80, a: 255), 4, 4, premultiplied: true),
+            new PhotoEdits { Look = Tone(brightness: 40) });
+        var opaqueStraight = EditRenderer.Apply(
+            Bmp(MakeBgra(4, 4, 80, 80, 80, a: 255), 4, 4),
+            new PhotoEdits { Look = Tone(brightness: 40) });
+        Check("预乘标记对全不透明的图毫无影响",
+              opaquePre.Pixels.SequenceEqual(opaqueStraight.Pixels));
 
         // ---- K12: 尺寸预告（不真算像素）与实际结果一致 ----
         var edits = new PhotoEdits { Rotation = 90, CropX = 0.25, CropY = 0.25, CropW = 0.5, CropH = 0.5 };
@@ -394,10 +462,7 @@ internal static class Program
             CropY = 0.1,
             CropW = 0.8,
             CropH = 0.8,
-            Brightness = 10,
-            Contrast = 10,
-            Saturation = 10,
-            Temperature = 10,
+            Look = Tone(brightness: 10, contrast: 10, saturation: 10, warmth: 10),
         });
         bigSw.Stop();
         Check("大图（400 万像素）全流程够快（< 3000ms，Debug 下也算宽裕）",
@@ -412,21 +477,25 @@ internal static class Program
             CropY = 0.25,
             CropW = 0.5,
             CropH = 0.375,
-            Brightness = 12.5,
-            Contrast = -8,
-            Saturation = 33,
-            Temperature = -20,
+            // 顺带覆盖 int 滑块项和 double 的滤镜项 —— 这两种的写法和精度都不一样
+            Look = Tone(brightness: 12, contrast: -8, saturation: 33, warmth: -20,
+                        fade: 0.25, grain: 0.125, mono: MonoMode.Silver),
         };
         string text = complex.Serialize();
         var parsed = PhotoEdits.Parse(text);
         Check("序列化 round-trip：字符串一致", parsed.Serialize() == text, text);
-        Check("序列化 round-trip：各字段都对",
+        Check("序列化 round-trip：几何字段都对",
               parsed.Rotation == 270 && parsed.FlipH && !parsed.FlipV
-              && Math.Abs(parsed.CropX - 0.125) < 1e-6 && Math.Abs(parsed.CropH - 0.375) < 1e-6
-              && Math.Abs(parsed.Brightness - 12.5) < 1e-6
-              && Math.Abs(parsed.Contrast + 8) < 1e-6
-              && Math.Abs(parsed.Saturation - 33) < 1e-6
-              && Math.Abs(parsed.Temperature + 20) < 1e-6);
+              && Math.Abs(parsed.CropX - 0.125) < 1e-6 && Math.Abs(parsed.CropH - 0.375) < 1e-6);
+        Check("序列化 round-trip：调色字段都对（含 int 与 double 两类）",
+              parsed.Look.Brightness == 12
+              && parsed.Look.Contrast == -8
+              && parsed.Look.Saturation == 33
+              && parsed.Look.Warmth == -20
+              && Math.Abs(parsed.Look.Fade - 0.25) < 1e-6
+              && Math.Abs(parsed.Look.Grain - 0.125) < 1e-6
+              && parsed.Look.Mono == MonoMode.Silver,
+              text);
 
         Check("序列化：没编辑过是空串（库里存 NULL）", new PhotoEdits().Serialize().Length == 0);
         Check("序列化：只写非默认项（旋转 90 的串里不该出现亮度）",
@@ -439,6 +508,9 @@ internal static class Program
               && PhotoEdits.Parse("").IsIdentity
               && PhotoEdits.Parse("????").IsIdentity
               && PhotoEdits.Parse("r=abc;b=;;=1").IsIdentity);
+        var legacyTone = PhotoEdits.Parse("b=50;c=50;s=50;t=50");
+        Check("解析：认不得的键忽略（旧版本的 b/c/s/t 不能被塞进调色字段）",
+              legacyTone.IsIdentity, legacyTone.Serialize());
         Check("规整：角度 450 → 90", new PhotoEdits { Rotation = 450 }.Normalized().Rotation == 90);
         Check("规整：角度 -90 → 270", new PhotoEdits { Rotation = -90 }.Normalized().Rotation == 270);
         var outOfRange = new PhotoEdits { CropX = -1, CropY = 0.9, CropW = 3, CropH = 0.5 }.Normalized();
@@ -446,19 +518,28 @@ internal static class Program
               Near(outOfRange.CropX, 0) && Near(outOfRange.CropW, 1)
               && outOfRange.CropY + outOfRange.CropH <= 1.0001,
               outOfRange.Serialize());
-        Check("规整：调色夹到 ±100",
-              new PhotoEdits { Brightness = 999, Temperature = -999 }.Normalized()
-                  is { Brightness: 100, Temperature: -100 });
-        Check("规整：NaN 当成 0（不然会把整张图算成垃圾）",
-              new PhotoEdits { Contrast = double.NaN }.Normalized().Contrast == 0);
+
+        var clampedTone = new PhotoEdits
+        {
+            Look = Tone(brightness: 999, warmth: -999, fade: 5, whiteDrop: -3),
+        }.Normalized();
+        Check("规整：调色滑块夹到 ±100、0~1 的项夹进 0~1",
+              clampedTone.Look.Brightness == 100 && clampedTone.Look.Warmth == -100
+              && Near(clampedTone.Look.Fade, 1) && Near(clampedTone.Look.WhiteDrop, 0),
+              clampedTone.Serialize());
+        Check("规整：认不出的黑白模式当“保留颜色”（别把图渲成一片黑）",
+              new PhotoEdits { Look = Tone(mono: (MonoMode)99) }.Normalized().Look.Mono == MonoMode.None);
 
         // ---- K16: 签名（缩略图缓存的 key）----
         Check("签名：同一组参数两次算出来一样",
-              new PhotoEdits { Rotation = 90, Brightness = 5 }.Signature()
-              == new PhotoEdits { Rotation = 90, Brightness = 5 }.Signature());
+              new PhotoEdits { Rotation = 90, Look = Tone(brightness: 5) }.Signature()
+              == new PhotoEdits { Rotation = 90, Look = Tone(brightness: 5) }.Signature());
         Check("签名：不同参数指纹不同",
               new PhotoEdits { Rotation = 90 }.Signature()
               != new PhotoEdits { Rotation = 180 }.Signature());
+        Check("签名：只调色不同，指纹也不同",
+              new PhotoEdits { Look = Tone(brightness: 5) }.Signature()
+              != new PhotoEdits { Look = Tone(brightness: 6) }.Signature());
         Check("签名：没编辑过是固定值 0", new PhotoEdits().Signature() == "0");
         Check("签名：只含文件名安全字符（16 进制）",
               new PhotoEdits { Rotation = 90, CropX = 0.5 }.Signature().All(
@@ -568,7 +649,13 @@ internal static class Program
         Check("v5 → v6：老图默认没编辑过（Edits = NULL）",
               index.GetEdits(Photo).IsIdentity && index.CountEdited() == 0);
 
-        var edits = new PhotoEdits { Rotation = 90, Brightness = 15, CropX = 0.1, CropW = 0.8 };
+        var edits = new PhotoEdits
+        {
+            Rotation = 90,
+            CropX = 0.1,
+            CropW = 0.8,
+            Look = Tone(brightness: 15, mono: MonoMode.Silver),
+        };
         index.SetEdits(Photo, edits);
         Check("写入后读回来一致", index.GetEdits(Photo).Serialize() == edits.Serialize(),
               index.GetEdits(Photo).Serialize());
@@ -604,7 +691,7 @@ internal static class Program
 
             string raw = r.IsDBNull(0) ? "" : r.GetString(0);
             Check("库里存的是可读文本（出问题时能直接用 sqlite 看）",
-                  raw.Contains("r=90") && raw.Contains("b=15"), raw);
+                  raw.Contains("r=90") && raw.Contains("brt=15") && raw.Contains("mon=2"), raw);
             Check("升级后 Source / Rating 列也原封不动",
                   !r.IsDBNull(1) && r.GetString(1) == "wechat" && r.GetInt32(2) == 4);
         }

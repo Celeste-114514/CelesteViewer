@@ -22,6 +22,12 @@ namespace CelesteGallery.Services;
 ///   1. 旋转 → 2. 翻转 → 3. 裁剪 → 4. 调色
 /// 裁剪用的是**旋转翻转之后**那张图的归一化坐标（0~1），
 /// 所以要紧跟着几何变换；调色放最后，这样它作用在"最终取景"上。
+///
+/// **调色为什么不自己写一套**：项目里已经有 <see cref="PhotoLook"/>
+/// （10 项调整 + 滤镜 + 自动增强），查看器的"调整"面板也是它。
+/// 再写第二套调色必然和它算得不一样，用户会看到"面板里预览一个样、
+/// 存下来再打开另一个样"—— 这是最难查也最伤信任的一类 bug。
+/// 所以这里直接复用 <see cref="LookSettings"/>，全项目只有一套调色算法。
 /// </summary>
 public sealed class PhotoEdits
 {
@@ -43,16 +49,20 @@ public sealed class PhotoEdits
     public double CropW { get; set; } = 1.0;
     public double CropH { get; set; } = 1.0;
 
-    // ---- 调色：全部是 -100 ~ +100 的"相对量"，0 = 不动 ----
-    //
-    // 用相对量而不是绝对像素值，好处是"忘记改过"不会毁图：
-    // 0 就是原样，任何一项单独调都不会把别的项带偏。
-    public double Brightness { get; set; }
-    public double Contrast { get; set; }
-    public double Saturation { get; set; }
-
-    /// <summary>色温：正数偏暖（加红减蓝），负数偏冷。</summary>
-    public double Temperature { get; set; }
+    /// <summary>
+    /// 调色（复用查看器"调整"面板那套参数）。
+    ///
+    /// 是 <c>struct</c>，所以**改不了它的字段** ——
+    /// <c>edits.Look.Brightness = 5;</c> 这行会编译不过（属性返回的是副本）。
+    /// 要改就先取出来、改完再整体赋回去：
+    /// <code>
+    /// var look = edits.Look;
+    /// look.Brightness = 5;
+    /// edits.Look = look;
+    /// </code>
+    /// 界面代码里已经有好几处这个写法，别图省事去踩。
+    /// </summary>
+    public LookSettings Look { get; set; }
 
     /// <summary>什么都没改。</summary>
     public bool IsIdentity => !HasGeometry && !HasCrop && !HasTone;
@@ -67,10 +77,8 @@ public sealed class PhotoEdits
     public bool HasCrop
         => CropX > 1e-4 || CropY > 1e-4 || CropW < 1.0 - 1e-4 || CropH < 1.0 - 1e-4;
 
-    /// <summary>调过色。</summary>
-    public bool HasTone
-        => Math.Abs(Brightness) > 0.01 || Math.Abs(Contrast) > 0.01
-        || Math.Abs(Saturation) > 0.01 || Math.Abs(Temperature) > 0.01;
+    /// <summary>调过色（一项都没动就是假的，渲染时整条调色流水线会跳过）。</summary>
+    public bool HasTone => !Look.IsNeutral;
 
     /// <summary>
     /// 规范化：角度归到 0/90/180/270，裁剪框夹进图内，调色夹到 ±100。
@@ -86,10 +94,7 @@ public sealed class PhotoEdits
             Rotation = ((Rotation % 360) + 360) % 360,
             FlipH = FlipH,
             FlipV = FlipV,
-            Brightness = Clamp100(Brightness),
-            Contrast = Clamp100(Contrast),
-            Saturation = Clamp100(Saturation),
-            Temperature = Clamp100(Temperature),
+            Look = ClampLook(Look),
         };
 
         // 旋转 90/270 时归一化坐标的宽高含义会互换 —— 这个换算由调用方负责
@@ -109,16 +114,56 @@ public sealed class PhotoEdits
         return e;
     }
 
-    private static double Clamp100(double v)
-        => double.IsNaN(v) ? 0 : Math.Clamp(v, -100, 100);
+    /// <summary>
+    /// 把调色项夹到滑块范围（±100，双精度项 0~1）。
+    ///
+    /// 界面上的滑块本来就压不出越界值，但**库是可以手改的** ——
+    /// 一个手滑敲进去的 5000 会让渲染时算出离谱的亮度偏移。
+    /// 存库前统一夹一遍，"库里的参数永远合法"这条约定才有意义。
+    /// </summary>
+    private static LookSettings ClampLook(LookSettings s)
+    {
+        s.Brightness = ClampSlider(s.Brightness);
+        s.Exposure = ClampSlider(s.Exposure);
+        s.Contrast = ClampSlider(s.Contrast);
+        s.Highlights = ClampSlider(s.Highlights);
+        s.Shadows = ClampSlider(s.Shadows);
+        s.Vignette = ClampSlider(s.Vignette);
+        s.Saturation = ClampSlider(s.Saturation);
+        s.Warmth = ClampSlider(s.Warmth);
+        s.Tint = ClampSlider(s.Tint);
+        s.Clarity = ClampSlider(s.Clarity);
+
+        s.Fade = ClampUnit(s.Fade);
+        s.Grain = ClampUnit(s.Grain);
+        s.Split = ClampUnit(s.Split);
+        s.BlackLift = ClampUnit(s.BlackLift);
+        s.WhiteDrop = ClampUnit(s.WhiteDrop);
+
+        // Mono 存的是枚举的整数值，认不出来的值当"保留颜色"，
+        // 免得将来加了新模式、老版本程序打开时把图渲成一片黑
+        if (s.Mono != MonoMode.None && s.Mono != MonoMode.Mono && s.Mono != MonoMode.Silver)
+            s.Mono = MonoMode.None;
+
+        return s;
+    }
+
+    private static int ClampSlider(int v) => Math.Clamp(v, PhotoLook.SliderMin, PhotoLook.SliderMax);
+
+    private static double ClampUnit(double v)
+        => double.IsNaN(v) ? 0 : Math.Clamp(v, 0, 1);
 
     /// <summary>
     /// 序列化成一行文本，存进 <c>Media.Edits</c>。
     ///
-    /// 格式：<c>r=90;fh=1;cx=0.1;cw=0.5;b=10;s=-20</c>（**只写非默认项**）。
-    /// 不选 JSON 的理由和 AppSettings 一样：参数就这么几个，
+    /// 格式：<c>r=90;fh=1;cx=0.1;cw=0.5;brt=10;sat=-20</c>（**只写非默认项**）。
+    /// 不选 JSON 的理由和 AppSettings 一样：参数就这么些，
     /// 一眼能读懂、能手改、出问题时用 sqlite 命令行直接看就知道对不对，
     /// 比引一层序列化划算。
+    ///
+    /// 调色那部分统一用 3 个字母的键（brt / exp / con…），
+    /// 不用首字母单键：十个项里 h（高光）和 s（阴影/饱和）这种撞在一起的太多，
+    /// 半年后翻库看到 <c>h=6</c> 根本想不起来是哪个。
     /// </summary>
     public string Serialize()
     {
@@ -138,7 +183,18 @@ public sealed class PhotoEdits
             // 那样解析回来会当场崩），并且裁掉多余的 0
             Add(key, value.ToString("0.####", CultureInfo.InvariantCulture));
         }
+        void AddInt(string key, int value)
+        {
+            if (value == 0) return;
+            Add(key, value.ToString(CultureInfo.InvariantCulture));
+        }
+        void AddFrac(string key, double value)
+        {
+            if (value <= 1e-9) return;
+            Add(key, value.ToString("0.####", CultureInfo.InvariantCulture));
+        }
 
+        // ---- 几何 ----
         if (e.Rotation != 0) Add("r", e.Rotation.ToString(CultureInfo.InvariantCulture));
         if (e.FlipH) Add("fh", "1");
         if (e.FlipV) Add("fv", "1");
@@ -152,10 +208,27 @@ public sealed class PhotoEdits
             Add("ch", e.CropH.ToString("0.#####", CultureInfo.InvariantCulture));
         }
 
-        AddNum("b", e.Brightness);
-        AddNum("c", e.Contrast);
-        AddNum("s", e.Saturation);
-        AddNum("t", e.Temperature);
+        // ---- 调色 ----
+        LookSettings L = e.Look;
+        AddInt("brt", L.Brightness);
+        AddInt("exp", L.Exposure);
+        AddInt("con", L.Contrast);
+        AddInt("hlt", L.Highlights);
+        AddInt("shd", L.Shadows);
+        AddInt("vig", L.Vignette);
+        AddInt("sat", L.Saturation);
+        AddInt("wrm", L.Warmth);
+        AddInt("tnt", L.Tint);
+        AddInt("clr", L.Clarity);
+
+        AddFrac("fad", L.Fade);
+        AddFrac("grn", L.Grain);
+        AddFrac("spl", L.Split);
+        AddFrac("bkl", L.BlackLift);
+        AddFrac("wht", L.WhiteDrop);
+
+        if (L.Mono != MonoMode.None)
+            Add("mon", ((int)L.Mono).ToString(CultureInfo.InvariantCulture));
 
         return sb.ToString();
     }
@@ -180,8 +253,11 @@ public sealed class PhotoEdits
             string key = part[..eq].Trim().ToLowerInvariant();
             string raw = part[(eq + 1)..].Trim();
 
+            LookSettings L = e.Look;
+
             switch (key)
             {
+                // ---- 几何 ----
                 case "r":
                     if (int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int r))
                         e.Rotation = r;
@@ -200,11 +276,37 @@ public sealed class PhotoEdits
                 case "cw": e.CropW = ParseNum(raw, e.CropW); break;
                 case "ch": e.CropH = ParseNum(raw, e.CropH); break;
 
-                case "b": e.Brightness = ParseNum(raw, 0); break;
-                case "c": e.Contrast = ParseNum(raw, 0); break;
-                case "s": e.Saturation = ParseNum(raw, 0); break;
-                case "t": e.Temperature = ParseNum(raw, 0); break;
+                // ---- 调色 ----
+                case "brt": L.Brightness = ParseInt(raw); break;
+                case "exp": L.Exposure = ParseInt(raw); break;
+                case "con": L.Contrast = ParseInt(raw); break;
+                case "hlt": L.Highlights = ParseInt(raw); break;
+                case "shd": L.Shadows = ParseInt(raw); break;
+                case "vig": L.Vignette = ParseInt(raw); break;
+                case "sat": L.Saturation = ParseInt(raw); break;
+                case "wrm": L.Warmth = ParseInt(raw); break;
+                case "tnt": L.Tint = ParseInt(raw); break;
+                case "clr": L.Clarity = ParseInt(raw); break;
+
+                case "fad": L.Fade = ParseNum(raw, 0); break;
+                case "grn": L.Grain = ParseNum(raw, 0); break;
+                case "spl": L.Split = ParseNum(raw, 0); break;
+                case "bkl": L.BlackLift = ParseNum(raw, 0); break;
+                case "wht": L.WhiteDrop = ParseNum(raw, 0); break;
+
+                case "mon":
+                    if (int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int mo))
+                        L.Mono = (MonoMode)mo;
+                    break;
+
+                default:
+                    // 其它键（包括旧版本写过的 b/c/s/t）一律忽略：
+                    // 那几个字母在本版里已经改归调色以外的含义，
+                    // 硬认回来只会把老库里的值塞进错误的字段
+                    continue;
             }
+
+            e.Look = L;
         }
 
         return e.Normalized();
@@ -213,6 +315,9 @@ public sealed class PhotoEdits
     private static double ParseNum(string raw, double fallback)
         => double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out double v)
            ? v : fallback;
+
+    private static int ParseInt(string raw)
+        => int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int v) ? v : 0;
 
     /// <summary>
     /// 短指纹（16 进制，8 位）。给缩略图缓存当 key 用 ——
@@ -253,10 +358,22 @@ public sealed class PhotoEdits
         CropY = other.CropY;
         CropW = other.CropW;
         CropH = other.CropH;
-        Brightness = other.Brightness;
-        Contrast = other.Contrast;
-        Saturation = other.Saturation;
-        Temperature = other.Temperature;
+        Look = other.Look;
+    }
+
+    /// <summary>只清掉调色，几何（旋转/翻转/裁剪）留着。</summary>
+    public void ClearTone() => Look = default;
+
+    /// <summary>只清掉几何，调色留着。</summary>
+    public void ClearGeometry()
+    {
+        Rotation = 0;
+        FlipH = false;
+        FlipV = false;
+        CropX = 0;
+        CropY = 0;
+        CropW = 1.0;
+        CropH = 1.0;
     }
 
     /// <summary>
@@ -273,10 +390,24 @@ public sealed class PhotoEdits
         if (e.FlipH) parts.Add("左右翻转");
         if (e.FlipV) parts.Add("上下翻转");
         if (e.HasCrop) parts.Add($"裁剪 {e.CropW * 100:0}%×{e.CropH * 100:0}%");
-        if (Math.Abs(e.Brightness) > 0.01) parts.Add($"亮度 {e.Brightness:+0;-0}");
-        if (Math.Abs(e.Contrast) > 0.01) parts.Add($"对比度 {e.Contrast:+0;-0}");
-        if (Math.Abs(e.Saturation) > 0.01) parts.Add($"饱和度 {e.Saturation:+0;-0}");
-        if (Math.Abs(e.Temperature) > 0.01) parts.Add($"色温 {e.Temperature:+0;-0}");
+
+        // 调色项最多列三项，多了这一行就没法看了
+        LookSettings L = e.Look;
+        int toneShown = 0;
+        void Tone(string name, int value)
+        {
+            if (toneShown >= 3 || value == 0) return;
+            parts.Add($"{name} {value:+0;-0}");
+            toneShown++;
+        }
+        Tone("亮度", L.Brightness);
+        Tone("曝光", L.Exposure);
+        Tone("对比度", L.Contrast);
+        Tone("饱和度", L.Saturation);
+        Tone("色温", L.Warmth);
+
+        if (L.Mono == MonoMode.Mono) parts.Add("黑白");
+        else if (L.Mono == MonoMode.Silver) parts.Add("银盐");
 
         return string.Join(" · ", parts);
     }
