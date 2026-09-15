@@ -244,6 +244,10 @@ public sealed partial class BrowserPage : Page
             }
         }
 
+        // 探测本机有没有微信 / QQ / 企业微信 的缓存图（只读目录结构，很快），
+        // 有还没进图库的就冒一条提示条。放最后、且不 await —— 别拖慢启动。
+        _ = RefreshSocialHintAsync();
+
         StartupLog.Write("BrowserPage: 就绪");
     }
 
@@ -356,10 +360,11 @@ public sealed partial class BrowserPage : Page
 
         string glyph = _groupBy switch
         {
-            // E787 = 日历，E722 = 相机
+            // E787 = 日历，E722 = 相机，E716 = 联系人（代表"来自哪个软件"）
             GroupBy.Date => "\uE787",
             GroupBy.Camera => "\uE722",
             GroupBy.Lens => "\uE722",
+            GroupBy.Source => "\uE716",
             _ => "\uE8B7",
         };
 
@@ -507,6 +512,7 @@ public sealed partial class BrowserPage : Page
                 GroupBy.Camera => "全部照片 · 按相机",
                 GroupBy.Lens => "全部照片 · 按镜头",
                 GroupBy.Rating => "全部照片 · 按评分",
+                GroupBy.Source => "全部照片 · 按来源",
                 _ => "全部照片",
             };
     }
@@ -687,6 +693,7 @@ public sealed partial class BrowserPage : Page
         if (info is null || info.IsRoot)
         {
             flyout.Items.Add(MakeMenuItem("添加文件夹到图库…", "\uE8E5", () => _ = PickFolderAndAddAsync()));
+            flyout.Items.Add(MakeMenuItem("添加社交缓存…", "\uE716", () => _ = AddSocialCachesAsync()));
             flyout.Items.Add(MakeMenuItem("刷新图库", "\uE72C", BuildTree));
             return flyout;
         }
@@ -720,6 +727,131 @@ public sealed partial class BrowserPage : Page
         LibraryStore.Remove(path);
         StartupLog.Write($"BrowserPage: 从图库移除 → {path}");
         BuildTree();
+    }
+
+    // ===== 社交缓存（微信 / QQ / 企业微信）=====
+    //
+    // 这些软件的缓存图在资源管理器里几乎没法看（哈希文件名、散在多层目录、没 EXIF），
+    // 收进图库后就能按"来源"和"日期"当正常相册浏览。
+    // 全程**只读**：只把目录路径记进图库清单，一个字节都不改人家的缓存。
+
+    /// <summary>用户点过提示条上的叉之后，就不再主动提示（可在右键菜单里手动加）。</summary>
+    private const string SocialHintDismissedKey = "SocialHintDismissed";
+
+    /// <summary>提示条上"待加入"的那批目录。点"加入图库"时直接用，不重新探测。</summary>
+    private List<SocialCacheRoot> _socialRoots = new();
+
+    /// <summary>
+    /// 探测社交缓存目录，有还没进图库的就冒一条提示条。
+    ///
+    /// 探测只是"看几个固定目录在不在"，很快，但仍丢到后台线程：
+    /// 将来若是要递归统计张数，放 UI 线程会直接卡住窗口。
+    /// </summary>
+    private async Task RefreshSocialHintAsync()
+    {
+        SocialHint.Visibility = Visibility.Collapsed;
+
+        if (AppSettings.GetBool(SocialHintDismissedKey, false)) return;
+
+        List<SocialCacheRoot> found;
+        try
+        {
+            found = await Task.Run(SocialCacheDetector.Detect);
+        }
+        catch (Exception ex)
+        {
+            StartupLog.Write("BrowserPage: 探测社交缓存失败", ex);
+            return;
+        }
+
+        _socialRoots = NotInLibrary(found);
+        if (_socialRoots.Count == 0) return;
+
+        // 按来源归并成一句话，别把四个目录列成四行
+        var apps = _socialRoots.Select(r => r.App).Distinct().ToList();
+
+        SocialHintText.Text =
+            $"发现 {string.Join("、", apps)} 的缓存图片（{_socialRoots.Count} 个目录）。" +
+            "加入图库后可用「按来源」统一浏览。";
+
+        SocialHint.Visibility = Visibility.Visible;
+
+        StartupLog.Write(
+            $"BrowserPage: 探测到未入图库的社交缓存 {_socialRoots.Count} 个 → {string.Join(" | ", apps)}");
+    }
+
+    /// <summary>去掉已经在图库清单里的那些目录（按忽略大小写、忽略结尾斜杠比较）。</summary>
+    private static List<SocialCacheRoot> NotInLibrary(List<SocialCacheRoot> roots)
+    {
+        var inLibrary = LibraryStore.Load();
+
+        return roots.Where(r => !inLibrary.Exists(p =>
+                    string.Equals(
+                        Path.TrimEndingDirectorySeparator(p),
+                        Path.TrimEndingDirectorySeparator(r.Path),
+                        StringComparison.OrdinalIgnoreCase)))
+                .ToList();
+    }
+
+    /// <summary>提示条上的"加入图库"和右键菜单"添加社交缓存…"都走这里。</summary>
+    private async void SocialAddButton_Click(object sender, RoutedEventArgs e)
+        => await AddSocialCachesAsync();
+
+    private void SocialHintClose_Click(object sender, RoutedEventArgs e)
+    {
+        SocialHint.Visibility = Visibility.Collapsed;
+        AppSettings.Set(SocialHintDismissedKey, true);
+        StartupLog.Write("BrowserPage: 社交缓存提示已关闭（不再提示）");
+    }
+
+    /// <summary>
+    /// 把社交缓存目录收进图库，然后整理一遍索引。
+    ///
+    /// 为什么要紧接着整理：这些目录可能几十万张，用户切到"按来源"时
+    /// 如果索引是空的会看到一棵空树，以为功能坏了。
+    /// </summary>
+    private async Task AddSocialCachesAsync()
+    {
+        List<SocialCacheRoot> found;
+        try
+        {
+            found = await Task.Run(SocialCacheDetector.Detect);
+        }
+        catch (Exception ex)
+        {
+            StartupLog.Write("BrowserPage: 探测社交缓存失败", ex);
+            return;
+        }
+
+        var todo = NotInLibrary(found);
+
+        if (todo.Count == 0)
+        {
+            ShowEmpty(found.Count == 0
+                ? "本机没找到微信 / QQ / 企业微信 的缓存图片目录"
+                : "社交缓存目录已经都在图库里了");
+            return;
+        }
+
+        foreach (SocialCacheRoot root in todo)
+        {
+            LibraryStore.Add(root.Path);
+            StartupLog.Write($"BrowserPage: 社交缓存加入图库 → {root.App} {root.Path}");
+        }
+
+        SocialHint.Visibility = Visibility.Collapsed;
+        _socialRoots = new List<SocialCacheRoot>();
+
+        var apps = todo.Select(r => r.App).Distinct().ToList();
+        StartupLog.Write($"BrowserPage: 社交缓存加入完成，共 {todo.Count} 个目录（{string.Join("、", apps)}）");
+
+        // 这些目录动辄几十万张，第一次整理要等一会儿 —— 进度显示在右侧空白处
+        BuildTree();
+        await EnsureIndexedAsync();
+        BuildTree();
+        if (IndexMode) await LoadFromIndexAsync();
+
+        ShowEmpty($"已加入 {string.Join("、", apps)} 的缓存目录。把左上角分类切到「按来源」即可查看。");
     }
 
     /// <summary>重新读一个节点的子目录（用户手动按的，所以直接展开着填）。</summary>

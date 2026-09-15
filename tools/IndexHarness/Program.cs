@@ -55,6 +55,7 @@ internal static class Program
         await MagickFallback();
         UserData();
         Duplicates();
+        SocialSource();
 
         Console.WriteLine();
         Console.WriteLine(_fail == 0 ? "==== 全部通过 ====" : $"==== 有 {_fail} 项失败 ====");
@@ -1123,6 +1124,202 @@ internal static class Program
         {
             try { Directory.Delete(dir, true); } catch { }
         }
+    }
+
+    // ==================== H. 来源 / 社交缓存（计划第 4 步） ====================
+
+    /// <summary>
+    /// 验证"来源"这条维度：路径识别、噪声过滤、按来源分组筛选、老库升级不丢用户数据。
+    ///
+    /// 为什么这些必须测死：
+    ///  - 识别错了 —— 微信的图被算成 QQ，用户按来源找图就去错地方了；
+    ///  - 同名文件夹误判 —— 用户自己的 "D:\备份\Tencent Files 备份" 被当成 QQ 缓存；
+    ///  - 噪声没滤掉 —— 三万七千张表情包涌进图库，真照片全被淹（本机实测就是这个数）；
+    ///  - 升级丢数据 —— 静默清零，用户根本不知道发生过什么。
+    /// </summary>
+    private static void SocialSource()
+    {
+        Console.WriteLine();
+        Console.WriteLine("==== H. 来源 / 社交缓存 ====");
+        Console.WriteLine();
+
+        // ---- H1: 路径 → 来源 ----
+        Check("识别：QQ 缓存图",
+              SocialCacheDetector.SourceOf(
+                  @"C:\Users\x\Documents\Tencent Files\178237225\nt_qq\nt_data\Pic\2026-09\a.jpg")
+              == SocialCacheDetector.QQ);
+
+        Check("识别：微信 4.0 缓存图",
+              SocialCacheDetector.SourceOf(
+                  @"C:\Users\x\Documents\xwechat_files\wxid_abc123\msg\attach\b.jpg")
+              == SocialCacheDetector.WeChat);
+
+        Check("识别：微信 3.x 旧版缓存图",
+              SocialCacheDetector.SourceOf(
+                  @"C:\Users\x\Documents\WeChat Files\abc123\FileStorage\Image\c.jpg")
+              == SocialCacheDetector.WeChat);
+
+        Check("识别：企业微信缓存图",
+              SocialCacheDetector.SourceOf(
+                  @"C:\Users\x\Documents\WXWork\1688850\Cache\Image\2026-09\d.jpg")
+              == SocialCacheDetector.WeCom);
+
+        Check("识别：普通照片目录不算社交缓存",
+              SocialCacheDetector.SourceOf(@"D:\我的照片\2026\上海\e.jpg") is null);
+
+        // 逐段比较的意义就在这条：目录名**多一个后缀**就不该认。
+        // 用 Contains("Tencent Files") 的话这里会被判成 QQ，把用户的备份目录当缓存扫。
+        Check("识别：同名文件夹（多了后缀）不误判",
+              SocialCacheDetector.SourceOf(@"D:\备份\Tencent Files 备份\f.jpg") is null);
+
+        Check("识别：空路径不炸", SocialCacheDetector.SourceOf(null) is null
+                              && SocialCacheDetector.SourceOf("") is null);
+
+        // ---- H2: 噪声（表情包 / 头像）过滤 ----
+        Check("过滤：QQ 表情包算噪声",
+              SocialCacheDetector.IsNoise(
+                  @"C:\Users\x\Documents\Tencent Files\178\nt_qq\nt_data\Emoji\a.png"));
+
+        Check("过滤：QQ 聊天图不算噪声",
+              !SocialCacheDetector.IsNoise(
+                  @"C:\Users\x\Documents\Tencent Files\178\nt_qq\nt_data\Pic\2026-09\a.jpg"));
+
+        Check("过滤：企业微信头像算噪声（目录名官方就拼成 Avator）",
+              SocialCacheDetector.IsNoise(
+                  @"C:\Users\x\Documents\WXWork\1688850\Cache\Avator\a.png"));
+
+        // 关键一条：过滤**只对社交缓存路径生效**。
+        // 不加这条限制的话，用户自己建个叫 Emoji 的文件夹放照片就被误伤了。
+        Check("过滤：自己的 Emoji 文件夹不受影响",
+              !SocialCacheDetector.IsNoise(@"D:\我的照片\Emoji\a.png"));
+
+        // ---- H3: 按来源分组 + 点某个来源筛出对应的图 ----
+        string db = Path.Combine(Path.GetTempPath(), "cvidx-social.db");
+        foreach (string f in new[] { db, db + "-wal", db + "-shm" })
+        { try { File.Delete(f); } catch { } }
+
+        string qq1 = @"C:\Users\x\Documents\Tencent Files\178\nt_qq\nt_data\Pic\2026-09\q1.jpg";
+        string qq2 = @"C:\Users\x\Documents\Tencent Files\178\nt_qq\nt_data\Pic\2026-09\q2.jpg";
+        string qq3 = @"C:\Users\x\Documents\Tencent Files\178\nt_qq\nt_data\Pic\2026-10\q3.jpg";
+        string wx1 = @"C:\Users\x\Documents\xwechat_files\wxid_a\msg\w1.jpg";
+        string wx2 = @"C:\Users\x\Documents\xwechat_files\wxid_a\msg\w2.jpg";
+        string me1 = @"D:\我的照片\2026\me1.jpg";
+
+        using (var index = new MediaIndex(db))
+        {
+            foreach (string p in new[] { qq1, qq2, qq3, wx1, wx2, me1 })
+                index.Upsert(Photo(p));
+
+            var groups = index.Group(GroupBy.Source);
+            int nQq = groups.FirstOrDefault(g => g.Key == SocialCacheDetector.QQ)?.Count ?? -1;
+            int nWx = groups.FirstOrDefault(g => g.Key == SocialCacheDetector.WeChat)?.Count ?? -1;
+            var local = groups.FirstOrDefault(g => g.Key == "");
+            int nMe = local?.Count ?? -1;
+
+            Check("按来源分组：QQ 3 张 / 微信 2 张 / 本地 1 张",
+                  nQq == 3 && nWx == 2 && nMe == 1,
+                  $"QQ {nQq} / 微信 {nWx} / 本地 {nMe}");
+
+            Check("按来源分组：没有来源的那组显示成「本地」，条数不受影响",
+                  local?.Label == "本地" && groups.Sum(g => g.Count) == 6,
+                  $"{groups.Sum(g => g.Count)} 张 / {groups.Count} 组");
+
+            // 左栏点「QQ」→ 右栏必须只有 QQ 的图。
+            // 分组和筛选走同一套条件，否则"QQ 写着 3 张、点进去只有 1 张"。
+            var qqOnly = index.Query(new MediaQuery
+            {
+                Group = GroupBy.Source,
+                GroupValue = SocialCacheDetector.QQ,
+            });
+            Check("点「QQ」筛出 3 张，且全是 QQ 的",
+                  qqOnly.Count == 3 && qqOnly.All(p => p == qq1 || p == qq2 || p == qq3),
+                  $"{qqOnly.Count} 张");
+
+            var wxOnly = index.Query(new MediaQuery
+            {
+                Group = GroupBy.Source,
+                GroupValue = SocialCacheDetector.WeChat,
+            });
+            Check("点「微信」筛出 2 张，不掺 QQ 的",
+                  wxOnly.Count == 2 && !wxOnly.Any(p => p == qq1 || p == qq2 || p == qq3),
+                  $"{wxOnly.Count} 张");
+
+            // 本地那组的 Key 是空字符串，筛选时也得能筛出来
+            var meOnly = index.Query(new MediaQuery { Group = GroupBy.Source, GroupValue = "" });
+            Check("点「本地」筛出 1 张", meOnly.Count == 1, $"{meOnly.Count} 张");
+        }
+
+        CheckSocialMigrate();
+    }
+
+    /// <summary>
+    /// 老库（v4，还没有 Source 列）升级到 v5：评分 / 收藏 / 标签一个都不能少，
+    /// 而且升完「按来源」这条分类要能正常用。
+    ///
+    /// 做法是先用真代码建库、把 Source 列**真删掉**再把版本号压回 4 ——
+    /// 这样才是真的"上个版本建的库"，不然加列逻辑根本没被走到。
+    /// </summary>
+    private static void CheckSocialMigrate()
+    {
+        string db = Path.Combine(Path.GetTempPath(), "cv-social-migrate.db");
+        foreach (string s in new[] { "", "-wal", "-shm" })
+        { try { File.Delete(db + s); } catch { } }
+
+        const string p = @"D:\Photos\old.jpg";
+
+        using (var old = new MediaIndex(db))
+        {
+            old.Upsert(Photo(p));
+            old.SetRating(p, 4);
+            old.SetFavorite(p, true);
+            old.SetTags(p, new[] { "老照片" });
+        }
+
+        // 退回到 v4 的样子：Source 列不存在、版本号是 4
+        bool dropped = true;
+        using (var conn = new SqliteConnection($"Data Source={db}"))
+        {
+            conn.Open();
+            try
+            {
+                using var c1 = conn.CreateCommand();
+                c1.CommandText = "DROP INDEX IF EXISTS IX_Media_Source;";
+                c1.ExecuteNonQuery();
+
+                using var c2 = conn.CreateCommand();
+                c2.CommandText = "ALTER TABLE Media DROP COLUMN Source;";
+                c2.ExecuteNonQuery();
+
+                using var c3 = conn.CreateCommand();
+                c3.CommandText = "PRAGMA user_version = 4;";
+                c3.ExecuteNonQuery();
+            }
+            catch
+            {
+                // 个别环境的 SQLite 不支持 DROP COLUMN，那就没法模拟真 v4。
+                // 与其报个假失败，不如明说这轮没测到。
+                dropped = false;
+            }
+        }
+
+        if (!dropped)
+        {
+            Console.WriteLine("  [跳过] 本环境 SQLite 不支持 DROP COLUMN，没法模拟 v4 老库");
+            return;
+        }
+
+        using var upgraded = new MediaIndex(db);
+
+        Check("老库 v4→v5：评分保住了", upgraded.GetRating(p) == 4, $"{upgraded.GetRating(p)} 星");
+        Check("老库 v4→v5：收藏保住了", upgraded.IsFavorite(p));
+        Check("老库 v4→v5：标签保住了",
+              upgraded.GetTags(p).Count == 1, string.Join("、", upgraded.GetTags(p)));
+
+        // 新列加上了、而且能用来分组 —— 老图没有来源，应该落在「本地」那组
+        var groups = upgraded.Group(GroupBy.Source);
+        Check("老库 v4→v5：按来源分组能用，老图归到「本地」",
+              groups.Count == 1 && groups[0].Label == "本地" && groups[0].Count == 1,
+              $"{groups.Count} 组 / {groups.Sum(g => g.Count)} 张");
     }
 
     /// <summary>造一张图：底色 fill，可选在 (bx,by) 画一个黑方块。写 PNG。</summary>

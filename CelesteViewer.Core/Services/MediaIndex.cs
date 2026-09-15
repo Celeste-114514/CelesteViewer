@@ -29,6 +29,12 @@ public enum GroupBy
     Camera,
     Lens,
     Rating,
+
+    /// <summary>
+    /// 按"来源"分：这张图是从哪儿来的（微信 / QQ / 企业微信 / 本地）。
+    /// 值在写入时由 <see cref="SocialCacheDetector.SourceOf"/> 从路径算出来，见 Upsert。
+    /// </summary>
+    Source,
 }
 
 /// <summary>右侧墙"按什么排"。</summary>
@@ -163,7 +169,7 @@ public sealed class MediaIndex : IDisposable
     /// 注意 v3 之后**不能再靠删表重建来升版**了 —— 库里开始存用户数据
     /// （评分 / 收藏 / 标签），删表等于把人家的评分悄悄清空。见 <see cref="MigrateFrom"/>。
     /// </summary>
-    private const int SchemaVersion = 4;
+    private const int SchemaVersion = 5;
 
     private readonly SqliteConnection _conn;
     private readonly object _gate = new();
@@ -261,6 +267,7 @@ public sealed class MediaIndex : IDisposable
                 Favorite      INTEGER NOT NULL DEFAULT 0,
                 Md5           TEXT    NULL,
                 PHash         TEXT    NULL,
+                Source        TEXT    NULL,
                 IndexedAt     INTEGER NOT NULL DEFAULT 0
             );");
 
@@ -274,6 +281,8 @@ public sealed class MediaIndex : IDisposable
         Exec("CREATE INDEX IF NOT EXISTS IX_Media_Favorite    ON Media(Favorite);");
         // Md5 用于"精确重复"查询（按值分组）；PHash 用于"相似"两两比，不按列查，不建索引。
         Exec("CREATE INDEX IF NOT EXISTS IX_Media_Md5         ON Media(Md5);");
+        // "按来源"分组 + 点某个来源筛图都走这一列
+        Exec("CREATE INDEX IF NOT EXISTS IX_Media_Source      ON Media(Source);");
 
         CreateTagsTable();
     }
@@ -331,6 +340,15 @@ public sealed class MediaIndex : IDisposable
                 Exec("ALTER TABLE Media ADD COLUMN Md5 TEXT NULL;");
             if (!ColumnExists("Media", "PHash"))
                 Exec("ALTER TABLE Media ADD COLUMN PHash TEXT NULL;");
+        }
+
+        // 4 → 5：加"来源"列（微信 / QQ / 企业微信 缓存图的归类）。
+        // 同样是只加不删。列是空的也没关系 —— 下次整理图库时按路径补上，
+        // 在那之前"按来源"只会显示一个"本地"组，不会崩。
+        if (from < 5)
+        {
+            if (!ColumnExists("Media", "Source"))
+                Exec("ALTER TABLE Media ADD COLUMN Source TEXT NULL;");
         }
     }
 
@@ -430,13 +448,13 @@ public sealed class MediaIndex : IDisposable
                     FileSize, ModifiedTicks, PixelWidth, PixelHeight,
                     DateTaken, DateEstimated, CameraMake, CameraModel, LensModel,
                     FNumber, ExposureTime, IsoSpeed, FocalLength,
-                    Rating, Md5, PHash, IndexedAt)
+                    Rating, Md5, PHash, Source, IndexedAt)
                 VALUES (
                     $path, $lower, $dir, $name, $kind,
                     $size, $ticks, $w, $h,
                     $date, $est, $make, $model, $lens,
                     $fnum, $exp, $iso, $focal,
-                    COALESCE($rating, 0), $md5, $phash, $now)
+                    COALESCE($rating, 0), $md5, $phash, $src, $now)
                 -- 注意：下面 DO UPDATE 里**故意不写 Favorite**。
                 -- 文件重扫一遍不该把用户标的收藏冲掉，不写就等于保留原值。
                 ON CONFLICT(Path) DO UPDATE SET
@@ -464,6 +482,9 @@ public sealed class MediaIndex : IDisposable
                     -- 万一某次没传（理论上不该发生），保留原值，别把算好的指纹清掉。
                     Md5           = COALESCE(excluded.Md5, Md5),
                     PHash         = COALESCE(excluded.PHash, PHash),
+                    -- 来源是纯派生的（从 Path 算出来），每次扫描都重算一遍最省心。
+                    -- Path 是主键不会变，所以不存在把用户手工改的来源冲掉的问题。
+                    Source        = excluded.Source,
                     IndexedAt     = excluded.IndexedAt;";
 
             string dir = string.Empty;
@@ -493,6 +514,12 @@ public sealed class MediaIndex : IDisposable
             cmd.Parameters.AddWithValue("$rating", (object?)rating ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$md5", (object?)md5 ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$phash", (object?)phash ?? DBNull.Value);
+
+            // 来源不用调用方传，从路径自己算 —— 这样所有 Upsert 调用点
+            // （正常扫描、以及压测工具）都自动带上，函数签名也不用改。
+            cmd.Parameters.AddWithValue("$src",
+                (object?)SocialCacheDetector.SourceOf(info.Path) ?? DBNull.Value);
+
             cmd.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
 
             cmd.ExecuteNonQuery();
@@ -979,6 +1006,11 @@ public sealed class MediaIndex : IDisposable
         {
             ct.ThrowIfCancellationRequested();
 
+            // 社交缓存里的表情包 / 头像 / 界面图标不进库（数量巨大，跟照片不搭）。
+            // 只对社交缓存路径生效，用户自己的同名文件夹不受影响。
+            // 不计入 Skipped —— 它不是"这次跳过、以后会补"，而是压根不该进来。
+            if (SocialCacheDetector.IsNoise(path)) continue;
+
             try
             {
                 if (!NeedsUpdate(path))
@@ -1273,6 +1305,8 @@ public sealed class MediaIndex : IDisposable
         // 评分是整数列，这里统一转成文本再交给 reader.GetString，
         // 免得下面读的时候碰到整数列直接抛类型转换异常
         GroupBy.Rating => "CAST(Rating AS TEXT)",
+        // 来源列可能是 NULL（老库升级后还没重扫），统一成空串好归到"本地"那一组
+        GroupBy.Source => "COALESCE(Source, '')",
         _ => "Directory",
     };
 
@@ -1294,6 +1328,8 @@ public sealed class MediaIndex : IDisposable
                 GroupBy.Camera => "未知相机",
                 GroupBy.Lens => "未知镜头",
                 GroupBy.Rating => "未评分",
+                // 没有来源 = 不是从社交软件缓存里来的，就是用户自己的图
+                GroupBy.Source => "本地",
                 _ => "(根目录)",
             };
         }
@@ -1375,6 +1411,12 @@ public sealed class MediaIndex : IDisposable
             case GroupBy.Rating:
                 c.cond = "Rating = $g";
                 c.parameters["$g"] = int.TryParse(value, out int r) ? r : 0;
+                return c;
+
+            case GroupBy.Source:
+                // 和 GroupExpression 一样把 NULL 当空串，否则点"本地"筛不出东西
+                c.cond = "COALESCE(Source, '') = $g";
+                c.parameters["$g"] = value;
                 return c;
 
             default:
