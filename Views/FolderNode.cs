@@ -1,4 +1,6 @@
-namespace CelesteViewer.Views;
+using Microsoft.UI.Xaml;
+
+namespace CelesteGallery.Views;
 
 /// <summary>
 /// 左侧目录树上一个节点对应的文件夹。
@@ -10,7 +12,7 @@ namespace CelesteViewer.Views;
 /// </summary>
 public sealed class FolderNode
 {
-    /// <summary>文件夹完整路径。"图库"根节点是空串。</summary>
+    /// <summary>文件夹完整路径。"图库"根节点、以及分区标题行是空串。</summary>
     public required string Path { get; init; }
 
     /// <summary>树上显示的名字（叶子目录名；根节点是"图库"）。</summary>
@@ -26,11 +28,40 @@ public sealed class FolderNode
     public bool IsRoot => Path.Length == 0;
 
     /// <summary>
+    /// 是不是"分区标题"行（目前只有"社交缓存"这一条）。
+    ///
+    /// 微信 / QQ / 企业微信的缓存目录动辄十几万张，跟桌面、图片、下载
+    /// 这些正常文件夹混在一起既不好找也不好认，所以在它们上面加一行标题，
+    /// 上面再画一条分隔线，视觉上分成两段。
+    ///
+    /// 标题行没有路径（<see cref="Path"/> 为空），所以点了不加载任何目录、
+    /// 也不会被展开 —— 复用 <see cref="IsRoot"/> 的既有判断即可。
+    /// </summary>
+    public bool IsSection { get; init; }
+
+    /// <summary>分区标题上方那条分隔线。普通条目不显示。</summary>
+    public Visibility SectionDividerVisibility
+        => IsSection ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>
+    /// 分区标题上面留出空隙，让"两段"看起来是分开的而不是挤在一起。
+    /// 普通条目零边距，保持原来的行距。
+    /// </summary>
+    public Thickness SectionMargin
+        => IsSection ? new Thickness(0, 12, 0, 2) : new Thickness(0);
+
+    /// <summary>
     /// 树上这一行的图标。
     /// 名字和 <see cref="GroupNode.Glyph"/> 一致 —— 两种条目共用同一个
     /// DataTemplate，模板按名字取值，名字对不上图标就不显示。
+    ///
+    /// 分区标题用联系人图标（和"按来源"那个维度一致，语义都是"来自哪个软件"）。
     /// </summary>
-    public string Glyph => "\uE8B7";
+    public string Glyph => IsSection ? "\uE716" : "\uE8B7";
+
+    /// <summary>分区标题的字体小一号，看着像一段的标题而不是一个可点开的文件夹。</summary>
+    public double LabelFontSize => IsSection ? 12.5 : 14;
 
     public override string ToString() => Label;
 }
+

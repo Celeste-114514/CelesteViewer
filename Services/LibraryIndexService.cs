@@ -5,7 +5,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace CelesteViewer.Services;
+namespace CelesteGallery.Services;
 
 /// <summary>
 /// 图库索引的"前台接待"。

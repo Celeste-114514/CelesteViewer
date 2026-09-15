@@ -1,4 +1,4 @@
-# CelesteViewer
+# CelesteGallery
 
 为本地图片打造的 Windows 看图器，WinUI 3 / C# / .NET 9。
 
@@ -14,7 +14,7 @@
 
 ## 安装
 
-从 [Releases](https://github.com/Celeste-114514/CelesteViewer/releases) 下载 `CelesteViewer-Setup-<版本>.exe` 运行即可。
+从 [Releases](https://github.com/Celeste-114514/CelesteGallery/releases) 下载 `CelesteGallery-Setup-<版本>.exe` 运行即可。
 
 程序是**框架依赖**发布，运行前需要：
 
@@ -26,19 +26,19 @@
 ## 构建
 
 ```
-dotnet build CelesteViewer.csproj -c Debug -p:Platform=x64
+dotnet build CelesteGallery.csproj -c Debug -p:Platform=x64
 ```
 
 打安装包（需 NSIS）：
 
 ```
-dotnet publish CelesteViewer.csproj -c Release -p:Platform=x64
-makensis.exe installer\CelesteViewer.nsi
+dotnet publish CelesteGallery.csproj -c Release -p:Platform=x64
+makensis.exe installer\CelesteGallery.nsi
 ```
 
 > 发布形态由 `Properties\PublishProfiles\win-x64.pubxml` 决定（框架依赖），
 > 命令行不用再传 `-p:RuntimeIdentifier` / `-p:SelfContained`。
-> 安装包输出到 `dist\CelesteViewer-Setup-<版本>.exe`。
+> 安装包输出到 `dist\CelesteGallery-Setup-<版本>.exe`。
 
 发布流程详见 `installer/README-安装包与更新.md`。
 

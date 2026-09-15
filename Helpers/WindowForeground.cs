@@ -1,7 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 
-namespace CelesteViewer.Helpers;
+namespace CelesteGallery.Helpers;
 
 /// <summary>
 /// 把一个窗口抬到 z 序最上面，并让它拿到前台（键盘焦点）。

@@ -6,7 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.Sqlite;
 
-namespace CelesteViewer.Services;
+namespace CelesteGallery.Services;
 
 /// <summary>
 /// 媒体种类。
@@ -176,16 +176,12 @@ public sealed class MediaIndex : IDisposable
     private bool _disposed;
 
     /// <summary>
-    /// 默认库文件位置：%LOCALAPPDATA%\CelesteViewer\library.db
+    /// 默认库文件位置：%LOCALAPPDATA%\CelesteGallery\library.db
     ///
     /// 放在本地应用数据目录而不是安装目录：安装目录在 Program Files 下
     /// 普通权限写不进去（之前做用户级安装包时踩过）。
     /// </summary>
-    public static string DefaultPath =>
-        Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "CelesteViewer",
-            "library.db");
+    public static string DefaultPath => AppPaths.File("library.db");
 
     public MediaIndex(string? dbPath = null)
     {

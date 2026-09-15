@@ -2,7 +2,7 @@ using System.Collections.Generic;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml.Controls;
 
-namespace CelesteViewer.Controls;
+namespace CelesteGallery.Controls;
 
 /// <summary>
 /// 能改鼠标指针的空容器。

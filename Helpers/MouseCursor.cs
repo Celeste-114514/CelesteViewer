@@ -1,7 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 
-namespace CelesteViewer.Helpers;
+namespace CelesteGallery.Helpers;
 
 /// <summary>
 /// 把鼠标指针藏起来（配合自绘的笔尖圆圈用）。

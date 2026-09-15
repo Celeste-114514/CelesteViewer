@@ -1,6 +1,6 @@
 using System;
 
-namespace CelesteViewer.Services;
+namespace CelesteGallery.Services;
 
 /// <summary>黑白处理的方式。</summary>
 public enum MonoMode

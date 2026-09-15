@@ -1,7 +1,7 @@
 using System;
 using System.IO;
 
-namespace CelesteViewer.Services;
+namespace CelesteGallery.Services;
 
 /// <summary>
 /// 文件头嗅探：看前几十个字节，判断"这东西到底像不像一张图"。

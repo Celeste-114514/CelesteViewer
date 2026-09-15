@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace CelesteViewer.Services;
+namespace CelesteGallery.Services;
 
 /// <summary>标记用的笔。</summary>
 public enum MarkTool

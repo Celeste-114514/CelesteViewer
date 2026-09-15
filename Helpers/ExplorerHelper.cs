@@ -1,7 +1,7 @@
 using System;
 using System.Diagnostics;
 
-namespace CelesteViewer.Helpers;
+namespace CelesteGallery.Helpers;
 
 /// <summary>
 /// 把"在资源管理器里打开"这事儿包起来。

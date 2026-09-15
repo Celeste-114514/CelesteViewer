@@ -3,7 +3,7 @@ using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 
-namespace CelesteViewer.Views;
+namespace CelesteGallery.Views;
 
 /// <summary>
 /// 缩略图墙上的一个格子。

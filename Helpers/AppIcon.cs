@@ -5,7 +5,7 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.Storage.Streams;
 
-namespace CelesteViewer.Helpers;
+namespace CelesteGallery.Helpers;
 
 /// <summary>
 /// 应用图标的两处用途，都从这里取路径，别在别处拼字符串：

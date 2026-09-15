@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace CelesteViewer.Services;
+namespace CelesteGallery.Services;
 
 /// <summary>擦掉之后那块地方填什么。</summary>
 public enum EraseMode

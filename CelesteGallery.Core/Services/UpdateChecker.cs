@@ -4,7 +4,7 @@ using System.Reflection;
 using System.Text.Json;
 using System.Threading.Tasks;
 
-namespace CelesteViewer.Services;
+namespace CelesteGallery.Services;
 
 /// <summary>
 /// 「检查更新」的纯逻辑部分：读 GitHub Releases latest 接口、比较版本号、
@@ -17,18 +17,18 @@ namespace CelesteViewer.Services;
 ///
 /// 仓库地址见 <see cref="GithubReleasesApi"/>。发版流程：
 /// 在 GitHub 上打 tag（如 v26.9.14）并发布 Release，
-/// 把名字里带 Setup 的安装包（CelesteViewer-Setup-*.exe）挂到资产里即可。
+/// 把名字里带 Setup 的安装包（CelesteGallery-Setup-*.exe）挂到资产里即可。
 /// 没有安装包资产时只提示"有新版本"，不给下载按钮。
 /// </summary>
 public static class UpdateChecker
 {
     /// <summary>GitHub Releases latest 接口。</summary>
     public const string GithubReleasesApi =
-        "https://api.github.com/repos/Celeste-114514/CelesteViewer/releases/latest";
+        "https://api.github.com/repos/Celeste-114514/CelesteGallery/releases/latest";
 
     /// <summary>Release 页面的地址（人工下载用，界面上的「GitHub Releases ↗」）。</summary>
     public const string ReleasesPageUrl =
-        "https://github.com/Celeste-114514/CelesteViewer/releases";
+        "https://github.com/Celeste-114514/CelesteGallery/releases";
 
     /// <summary>最近一次发现的新版本（仅当比当前版本新才非空）。</summary>
     public sealed class UpdateInfo
@@ -59,7 +59,7 @@ public static class UpdateChecker
     /// <summary>
     /// 当前程序集版本号（如 "26.9.13" 或 "26.9.13.1"）。
     ///
-    /// 用 <c>GetEntryAssembly</c>**不是**随手写的：这个类住在 CelesteViewer.Core 里，
+    /// 用 <c>GetEntryAssembly</c>**不是**随手写的：这个类住在 CelesteGallery.Core 里，
     /// <c>GetExecutingAssembly()</c> 在这个类里拿到的是 Core.dll 的版本号，
     /// 而 csproj 里配的 <c>&lt;Version&gt;</c> 只写进主程序 exe —— 两者对不上，
     /// 结果就是"永远检查不到更新"或者"永远提示有更新"。
@@ -198,7 +198,7 @@ public static class UpdateChecker
         {
             using var http = new HttpClient();
             http.Timeout = TimeSpan.FromSeconds(15);
-            http.DefaultRequestHeaders.UserAgent.ParseAdd("CelesteViewer/" + CurrentVersionText());
+            http.DefaultRequestHeaders.UserAgent.ParseAdd("CelesteGallery/" + CurrentVersionText());
 
             string json = await http.GetStringAsync(GithubReleasesApi);
             return (ReadTag(json), FindSetupAsset(json), ReadNotes(json));

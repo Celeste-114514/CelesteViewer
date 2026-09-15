@@ -1,9 +1,9 @@
-﻿; CelesteViewer installer script (NSIS 3.x, Modern UI 2, 简体中文)
-; Build: makensis.exe installer\CelesteViewer.nsi
+﻿; CelesteGallery installer script (NSIS 3.x, Modern UI 2, 简体中文)
+; Build: makensis.exe installer\CelesteGallery.nsi
 ;
 ; 与 CelesteMusicPlayer 的安装包同一套做法：
 ;   用户级安装（不用管理员）、装在 %LOCALAPPDATA%\Programs\ 下、
-;   卸载时可选保留用户数据、文件名必须形如 CelesteViewer-Setup-<版本>.exe
+;   卸载时可选保留用户数据、文件名必须形如 CelesteGallery-Setup-<版本>.exe
 ;   —— 应用内「检查更新」靠文件名里的 Setup 认出这是安装包。
 ;
 ; 发布形态是**框架依赖**（跟 MusicPlayer 一样，不自包含）：
@@ -11,13 +11,24 @@
 ;   否则双击没反应。所以安装前先查这两个，缺哪个就提示去下载哪个。
 
 ; ---------- Metadata ----------
-!define APP_NAME "CelesteViewer"
+!define APP_NAME "CelesteGallery"
 !define APP_VERSION "26.9.14"
-!define APP_EXE "CelesteViewer.exe"
-; 发布目录注意带 x64 一层 —— 跟 CelesteViewer.csproj 里
+!define APP_EXE "CelesteGallery.exe"
+; 发布目录注意带 x64 一层 —— 跟 CelesteGallery.csproj 里
 ; CelesteCopyPriToPublish 那个 target 的输出保持一致，
-; 否则会打进一个缺 CelesteViewer.pri 的残缺发布目录（启动即崩）。
-!define PUBLISH_DIR "C:\Users\admin\source\repos\CelesteViewer\bin\x64\Release\net9.0-windows10.0.26100.0\win-x64\publish"
+; 否则会打进一个缺 CelesteGallery.pri 的残缺发布目录（启动即崩）。
+;
+; **路径写成相对路径**（相对你运行 makensis 时的当前目录，也就是仓库根）：
+; 2026-09-16 改应用名时踩过 —— 原来这里写死了 "C:\Users\admin\source\repos\CelesteViewer\..."，
+; 仓库目录一改名，安装包就指向不存在的路径。写成相对的之后，
+; 仓库文件夹叫什么名字都无所谓。
+!define PUBLISH_DIR "bin\x64\Release\net9.0-windows10.0.26100.0\win-x64\publish"
+
+; 编译期就挡住"发布目录还没生成"这种情况 ——
+; 否则会打出一个装上去启动即崩的残包，而且要到用户机器上才发现。
+!if ! /FileExists "${PUBLISH_DIR}\${APP_EXE}"
+  !error "找不到发布目录（${PUBLISH_DIR}\${APP_EXE}）。请在仓库根目录先跑 dotnet publish -c Release -p:Platform=x64，再从仓库根目录运行 makensis installer\CelesteGallery.nsi"
+!endif
 !define APP_GUID "{7B4E1D92-3C5A-4F18-9D60-2A8C7E5B41F3}"
 !define REG_UNINST "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
 !define REG_RUN "Software\Microsoft\Windows\CurrentVersion\Run"
@@ -40,8 +51,9 @@ Unicode true
 RequestExecutionLevel user
 Name "${APP_NAME}"
 ; 安装包落在项目的 dist\ 目录（不往桌面丢东西），上传 GitHub Release 也从这里取。
-; 文件名必须是 CelesteViewer-Setup-<版本>.exe —— 应用内「检查更新」靠 Setup 字样认出安装包。
-OutFile "C:\Users\admin\source\repos\CelesteViewer\dist\CelesteViewer-Setup-${APP_VERSION}.exe"
+; 文件名必须是 CelesteGallery-Setup-<版本>.exe —— 应用内「检查更新」靠 Setup 字样认出安装包。
+; 和 PUBLISH_DIR 一样写成相对路径（相对仓库根），仓库目录改名也不会失效。
+OutFile "dist\CelesteGallery-Setup-${APP_VERSION}.exe"
 InstallDir "$LOCALAPPDATA\Programs\${APP_NAME}"
 InstallDirRegKey HKCU "Software\${APP_NAME}" "InstallLocation"
 SetCompressor lzma
@@ -221,8 +233,8 @@ FunctionEnd
 ; 把检测过程记一份到 %TEMP%，万一以后还有误报，直接看这个文件就知道
 ; 每级判据实际返回了什么，不用再猜。
 Function WriteDiagLog
-  FileOpen $9 "$TEMP\CelesteViewer-setup-diag.log" w
-  FileWrite $9 "--- CelesteViewer 安装包运行时检测 ---$\r$\n"
+  FileOpen $9 "$TEMP\CelesteGallery-setup-diag.log" w
+  FileWrite $9 "--- CelesteGallery 安装包运行时检测 ---$\r$\n"
   FileWrite $9 "MissingDotnet = $MissingDotnet  (1 = 判定为缺)$\r$\n"
   FileWrite $9 "MissingWasdk  = $MissingWasdk  (1 = 判定为缺)$\r$\n"
   FileWrite $9 "WasdkRepoHit  = $WasdkRepoHit  (1 = 注册表里查到了 WindowsAppRuntime 2.x)$\r$\n"
@@ -260,8 +272,8 @@ FunctionEnd
 Section "看图器主程序（必需）" SEC_APP
   SectionIn RO
 
-  ; 更新场景：先关掉正在运行的旧版本，释放 CelesteViewer.exe 的文件锁，否则覆盖安装会失败
-  ExecWait 'taskkill /F /IM CelesteViewer.exe'
+  ; 更新场景：先关掉正在运行的旧版本，释放 CelesteGallery.exe 的文件锁，否则覆盖安装会失败
+  ExecWait 'taskkill /F /IM CelesteGallery.exe'
   Sleep 1000
 
   SetOutPath "$INSTDIR"
@@ -299,7 +311,7 @@ SectionEnd
 
 ; ---------- Section descriptions ----------
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
-  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_APP} "CelesteViewer 主程序和全部运行文件（必须安装）。"
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_APP} "CelesteGallery 主程序和全部运行文件（必须安装）。"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_DESKTOP} "在桌面创建启动快捷方式。"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_STARTMENU} "在开始菜单创建启动与卸载快捷方式。"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_AUTORUN} "登录 Windows 后自动启动 ${APP_NAME}。"
@@ -308,7 +320,7 @@ SectionEnd
 ; ---------- Uninstall ----------
 Section "Uninstall"
   ; 卸载前先关闭可能仍在运行的程序，避免文件占用导致残留
-  ExecWait 'taskkill /F /IM CelesteViewer.exe'
+  ExecWait 'taskkill /F /IM CelesteGallery.exe'
   Sleep 500
 
   ; 询问是否删除用户数据（仅在 GUI 交互模式弹出；静默 /S 卸载自动保留数据）

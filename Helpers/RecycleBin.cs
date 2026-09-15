@@ -2,9 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
-using CelesteViewer.Services;
+using CelesteGallery.Services;
 
-namespace CelesteViewer.Helpers;
+namespace CelesteGallery.Helpers;
 
 /// <summary>
 /// 把文件移到 Windows 回收站（而不是硬删），这样删错了能去回收站还原。

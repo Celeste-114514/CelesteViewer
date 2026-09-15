@@ -5,7 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using ImageMagick;
 
-namespace CelesteViewer.Services;
+namespace CelesteGallery.Services;
 
 /// <summary>
 /// 兜底解码器：Magick.NET（ImageMagick 的 .NET 封装）。

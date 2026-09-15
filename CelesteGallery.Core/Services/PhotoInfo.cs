@@ -1,6 +1,6 @@
 using System;
 
-namespace CelesteViewer.Services;
+namespace CelesteGallery.Services;
 
 /// <summary>
 /// 一张图片的全部"可见信息"。

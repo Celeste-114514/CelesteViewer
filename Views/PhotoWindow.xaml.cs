@@ -1,12 +1,12 @@
 using System;
 using System.Collections.Generic;
-using CelesteViewer.Helpers;
+using CelesteGallery.Helpers;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Windows.Graphics;
 
-namespace CelesteViewer.Views;
+namespace CelesteGallery.Views;
 
 /// <summary>
 /// 独立看图窗口。

@@ -3,7 +3,7 @@ using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Windows.Graphics;
 
-namespace CelesteViewer.Helpers;
+namespace CelesteGallery.Helpers;
 
 /// <summary>
 /// 子窗口的定位：让它开在**主窗口正中间**，而不是屏幕正中间。
@@ -51,7 +51,7 @@ public static class WindowPlacement
     {
         try
         {
-            if (global::CelesteViewer.App.Instance?.AppWindow is not AppWindow owner) return null;
+            if (global::CelesteGallery.App.Instance?.AppWindow is not AppWindow owner) return null;
 
             PointInt32 pos = owner.Position;
             SizeInt32 size = owner.Size;

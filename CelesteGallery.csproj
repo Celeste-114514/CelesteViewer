@@ -14,7 +14,7 @@
     <TargetFramework>net9.0-windows10.0.26100.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <WindowsSdkPackageVersion>10.0.26100.87</WindowsSdkPackageVersion>
-    <RootNamespace>CelesteViewer</RootNamespace>
+    <RootNamespace>CelesteGallery</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Platforms>x86;x64;ARM64</Platforms>
     <RuntimeIdentifiers>win-x86;win-x64;win-arm64</RuntimeIdentifiers>
@@ -53,7 +53,7 @@
   <!--
     主项目刻意不设 RuntimeIdentifier：
     XamlCompiler 对输出路径很敏感，加上 RID 会多出一层 win-x64 目录，
-    有概率触发它崩。native 库复制的事交给 CelesteViewer.Core 自己处理。
+    有概率触发它崩。native 库复制的事交给 CelesteGallery.Core 自己处理。
   -->
 
   <!--
@@ -105,7 +105,7 @@
   </ItemGroup>
 
   <!--
-    解码、缩略图、EXIF 全部放在 CelesteViewer.Core 类库里。
+    解码、缩略图、EXIF 全部放在 CelesteGallery.Core 类库里。
 
     为什么非要拆出去：Magick.NET 会把它的 native 解码库塞进 MSBuild 的 items 列表，
     而 WinUI 的 XamlCompiler 一看到不认识的 item 就直接崩（报 output.json was not created
@@ -113,18 +113,18 @@
     放进类库之后，那些 items 只存在于类库内部，主项目的 XamlCompiler 看不见。
   -->
   <ItemGroup>
-    <ProjectReference Include="CelesteViewer.Core\CelesteViewer.Core.csproj" />
+    <ProjectReference Include="CelesteGallery.Core\CelesteGallery.Core.csproj" />
   </ItemGroup>
 
   <!--
-    ===== 必须排除：CelesteViewer.Core 是本项目的子目录 =====
+    ===== 必须排除：CelesteGallery.Core 是本项目的子目录 =====
 
     SDK 默认的源码通配是 `**/*.cs`，而它只排除"本项目自己的" obj\ 和 bin\。
-    CelesteViewer.Core 是主项目目录下的**子目录**，不在排除范围内，于是：
+    CelesteGallery.Core 是主项目目录下的**子目录**，不在排除范围内，于是：
 
       1. Core 的源码被主项目又编译了一遍 → 同一批类型在
-         CelesteViewer.dll 和 CelesteViewer.Core.dll 里各存在一份
-      2. 更糟的是 Core 的 obj\ 生成物（CelesteViewer.Core.AssemblyInfo.cs）也一起
+         CelesteGallery.dll 和 CelesteGallery.Core.dll 里各存在一份
+      2. 更糟的是 Core 的 obj\ 生成物（CelesteGallery.Core.AssemblyInfo.cs）也一起
          被编译进来 → 与主项目自己的 AssemblyInfo.cs 撞车，
          报一堆 CS0579「特性重复」（AssemblyCompanyAttribute 等）
 
@@ -134,14 +134,14 @@
     Debug 和 Release 都要有，所以这里不限定 Configuration。
   -->
   <ItemGroup>
-    <Compile Remove="CelesteViewer.Core\**\*.cs" />
-    <None Remove="CelesteViewer.Core\**" />
-    <Content Remove="CelesteViewer.Core\**" />
-    <Page Remove="CelesteViewer.Core\**" />
-    <PRIResource Remove="CelesteViewer.Core\**" />
-    <EmbeddedResource Remove="CelesteViewer.Core\**" />
-    <ApplicationDefinition Remove="CelesteViewer.Core\**" />
-    <Manifest Remove="CelesteViewer.Core\**" />
+    <Compile Remove="CelesteGallery.Core\**\*.cs" />
+    <None Remove="CelesteGallery.Core\**" />
+    <Content Remove="CelesteGallery.Core\**" />
+    <Page Remove="CelesteGallery.Core\**" />
+    <PRIResource Remove="CelesteGallery.Core\**" />
+    <EmbeddedResource Remove="CelesteGallery.Core\**" />
+    <ApplicationDefinition Remove="CelesteGallery.Core\**" />
+    <Manifest Remove="CelesteGallery.Core\**" />
   </ItemGroup>
 
   <!--
@@ -151,7 +151,7 @@
     主项目的源码通配是 **/*.cs，不排除的话它会把 IndexHarness 的 Program.cs
     也一起编译进来 —— 于是主程序里多出一个 Main，和 WinUI 的入口打架。
 
-    和上面 CelesteViewer.Core 那段是同一个坑的不同版本：只要往主项目目录里
+    和上面 CelesteGallery.Core 那段是同一个坑的不同版本：只要往主项目目录里
     放了"另一个项目"，就必须在这里加一条排除。
   -->
   <ItemGroup>
@@ -199,14 +199,14 @@
     而"把 *.pri 加进待发布列表"正是它们干的活。
 
     后果极其隐蔽：dotnet publish **不报任何错**，产物看着也齐全（128MB / 56 个文件），
-    但发布目录里根本没有 CelesteViewer.pri。装到机器上一点开就死在 MainWindow 的
+    但发布目录里根本没有 CelesteGallery.pri。装到机器上一点开就死在 MainWindow 的
     LoadComponent —— XAML 资源全部索引不到，日志只有一句 0x80004005，看不出跟资源有关。
     （Debug 构建能跑，所以开发时完全发现不了；只有真正走发布流程才会暴露。）
 
     实测（2026-09-14）：
-      Debug / Release build 输出目录 → 有 CelesteViewer.pri，能跑
+      Debug / Release build 输出目录 → 有 CelesteGallery.pri，能跑
       Release publish 目录          → 一个 .pri 都没有，必崩
-      手工把 CelesteViewer.pri 复制进发布目录 → 立刻恢复正常（存活，致命错误 0 条）
+      手工把 CelesteGallery.pri 复制进发布目录 → 立刻恢复正常（存活，致命错误 0 条）
       对照 CelesteMusicPlayer 的发布目录 → 它也只有 <App>.pri、没有 xbf 散文件，
       说明 xbf 已经被索引进 pri 里了，不需要单独复制 xbf。
 
@@ -223,9 +223,9 @@
           SkipUnchangedFiles="true"
           Condition="Exists('$(OutDir)$(MSBuildProjectName).pri')" />
     <Message Importance="high"
-             Text="CelesteViewer: PRI 资源索引已补入发布目录 → $(PublishDir)"
+             Text="CelesteGallery: PRI 资源索引已补入发布目录 → $(PublishDir)"
              Condition="Exists('$(OutDir)$(MSBuildProjectName).pri')" />
-    <Warning Text="CelesteViewer: 找不到 $(OutDir)$(MSBuildProjectName).pri —— 发布产物会缺 XAML 资源索引，装上去启动即崩，请检查构建是否完整。"
+    <Warning Text="CelesteGallery: 找不到 $(OutDir)$(MSBuildProjectName).pri —— 发布产物会缺 XAML 资源索引，装上去启动即崩，请检查构建是否完整。"
              Condition="!Exists('$(OutDir)$(MSBuildProjectName).pri')" />
   </Target>
 </Project>

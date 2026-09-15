@@ -2,15 +2,15 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
-using CelesteViewer.Helpers;
-using CelesteViewer.Services;
+using CelesteGallery.Helpers;
+using CelesteGallery.Services;
 using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 
-namespace CelesteViewer.Views;
+namespace CelesteGallery.Views;
 
 /// <summary>
 /// 「文件关联」窗口：按类别列出本看图器能打开的每一种格式，
@@ -114,7 +114,7 @@ public sealed partial class FileAssociationWindow : Window
         ConfigureWindowChrome();
 
         _executablePath = Environment.ProcessPath
-            ?? System.IO.Path.Combine(AppContext.BaseDirectory, "CelesteViewer.exe");
+            ?? System.IO.Path.Combine(AppContext.BaseDirectory, "CelesteGallery.exe");
 
         BuildGroups();
         LoadCurrentSelection();
@@ -402,7 +402,7 @@ public sealed partial class FileAssociationWindow : Window
             ContentDialog confirm = new()
             {
                 Title = "取消全部关联？",
-                Content = "将移除 CelesteViewer 对所有图片格式的关联，之后双击图片不会再打开本程序。",
+                Content = "将移除 CelesteGallery 对所有图片格式的关联，之后双击图片不会再打开本程序。",
                 PrimaryButtonText = "取消关联",
                 CloseButtonText = "算了",
                 DefaultButton = ContentDialogButton.Close,

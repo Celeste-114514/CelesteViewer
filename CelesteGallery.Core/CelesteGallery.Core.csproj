@@ -5,7 +5,7 @@
     <!-- 与 CelesteVideoPlayer 保持一致：本机没装 19041 版 Windows SDK（只有 22621/26100/28000），
          填 19041 会在命令行构建时报 "读不到 Platform.xml"。 -->
     <WindowsSdkPackageVersion>10.0.26100.87</WindowsSdkPackageVersion>
-    <RootNamespace>CelesteViewer.Core</RootNamespace>
+    <RootNamespace>CelesteGallery.Core</RootNamespace>
     <Nullable>enable</Nullable>
     <Platforms>x86;x64;ARM64</Platforms>
     <RuntimeIdentifiers>win-x86;win-x64;win-arm64</RuntimeIdentifiers>
@@ -41,7 +41,7 @@
     曾经以为"没有单数 RID 就不复制 native 库"，还照此加过一段
     <RuntimeIdentifier> 条件配置 —— 那次改完程序启动崩溃，我就把锅算在 RID 头上，
     其实完全无关（真正的原因是主项目把本类库的 obj 生成物也编译了一遍，
-    见 CelesteViewer.csproj 里那段 Compile Remove 的说明）。
+    见 CelesteGallery.csproj 里那段 Compile Remove 的说明）。
     RID 单数配置已删除，保持和 CelesteMediaPlayer 一致的写法。
   -->
 

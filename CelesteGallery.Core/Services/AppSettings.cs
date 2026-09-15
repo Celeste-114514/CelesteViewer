@@ -3,10 +3,10 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 
-namespace CelesteViewer.Services;
+namespace CelesteGallery.Services;
 
 /// <summary>
-/// 一点简单的偏好设置，存在 %LOCALAPPDATA%\CelesteViewer\settings.txt。
+/// 一点简单的偏好设置，存在 %LOCALAPPDATA%\CelesteGallery\settings.txt。
 ///
 /// 刻意不引配置库、也不搞 JSON —— 就一个 "键=值" 的文本文件。
 /// 理由：需要记的东西目前只有两三个（上次打开的文件夹、缩略图大小），
@@ -19,17 +19,7 @@ public static class AppSettings
     private static readonly object Sync = new();
     private static Dictionary<string, string>? _cache;
 
-    private static string FilePath
-    {
-        get
-        {
-            string dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "CelesteViewer");
-            try { Directory.CreateDirectory(dir); } catch { }
-            return Path.Combine(dir, "settings.txt");
-        }
-    }
+    private static string FilePath => AppPaths.File("settings.txt");
 
     public static string? Get(string key)
     {

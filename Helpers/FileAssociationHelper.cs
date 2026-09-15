@@ -1,10 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using CelesteViewer.Services;
+using CelesteGallery.Services;
 using Microsoft.Win32;
 
-namespace CelesteViewer.Helpers;
+namespace CelesteGallery.Helpers;
 
 /// <summary>
 /// 文件关联：把图片格式的"双击打开"指向本程序。
@@ -24,7 +24,22 @@ namespace CelesteViewer.Helpers;
 /// </summary>
 public static class FileAssociationHelper
 {
-    public const string ProgId = "CelesteViewer.Image";
+    public const string ProgId = "CelesteGallery.Image";
+
+    /// <summary>
+    /// 改名前用的 ProgId。
+    ///
+    /// ⚠ **不要跟着全仓库改名一起替换掉这一行**（2026-09-16 踩过 AppPaths 里同样的一脚）。
+    /// 留着它是因为注册表里可能还有旧版写下的条目：
+    /// 那些条目指向已经不存在的 CelesteViewer.exe，表现就是"双击图片没反应"。
+    /// 把它也算成"我们自己的"，解除关联时才能一并清掉；
+    /// 否则旧条目会永远赖在注册表里，用户还以为是新版本坏了。
+    /// </summary>
+    public const string LegacyProgId = "CelesteViewer.Image";
+
+    /// <summary>这个 ProgId 是不是本程序写的（含改名前的旧名）。</summary>
+    private static bool IsOursProgId(string? value)
+        => value == ProgId || value == LegacyProgId;
 
     /// <summary>
     /// 全部可关联的格式（常见 + Magick 兜底 + 可当一叠图翻的压缩包）。
@@ -75,7 +90,7 @@ public static class FileAssociationHelper
             foreach (string ext in AllExtensions)
             {
                 using RegistryKey? extKey = classes.OpenSubKey(ext);
-                if (extKey?.GetValue(string.Empty) as string == ProgId)
+                if (IsOursProgId(extKey?.GetValue(string.Empty) as string))
                     result.Add(ext);
             }
         }
@@ -105,7 +120,7 @@ public static class FileAssociationHelper
                 try
                 {
                     using RegistryKey? extKey = classes.OpenSubKey(ext, writable: true);
-                    if (extKey?.GetValue(string.Empty) as string == ProgId)
+                    if (IsOursProgId(extKey?.GetValue(string.Empty) as string))
                         classes.DeleteSubKeyTree(ext, throwOnMissingSubKey: false);
                 }
                 catch (Exception caught)
@@ -136,14 +151,14 @@ public static class FileAssociationHelper
 
         using RegistryKey classes = Registry.CurrentUser.CreateSubKey(@"Software\Classes");
         using RegistryKey progId = classes.CreateSubKey(ProgId);
-        progId.SetValue(string.Empty, "CelesteViewer Image");
-        progId.SetValue("FriendlyTypeName", "CelesteViewer Image");
+        progId.SetValue(string.Empty, "CelesteGallery Image");
+        progId.SetValue("FriendlyTypeName", "CelesteGallery Image");
 
         using RegistryKey defaultIcon = progId.CreateSubKey("DefaultIcon");
         defaultIcon.SetValue(string.Empty, exe + ",0");
 
         using RegistryKey shell = progId.CreateSubKey(@"shell\open");
-        shell.SetValue(string.Empty, "Open with CelesteViewer");
+        shell.SetValue(string.Empty, "Open with CelesteGallery");
         using RegistryKey command = shell.CreateSubKey("command");
         command.SetValue(string.Empty, $"\"{exe}\" \"%1\"");
 
@@ -151,6 +166,17 @@ public static class FileAssociationHelper
         {
             using RegistryKey extKey = classes.CreateSubKey(NormalizeExtension(raw));
             extKey.SetValue(string.Empty, ProgId);
+        }
+
+        // 旧的 ProgId 已经没用了（它的命令指向改名前的 exe），顺手删掉 ——
+        // 留着只会在注册表里堆一份"指向不存在程序"的僵尸关联。
+        try
+        {
+            classes.DeleteSubKeyTree(LegacyProgId, throwOnMissingSubKey: false);
+        }
+        catch (Exception caught)
+        {
+            StartupLog.Write("FileAssociationHelper.Register(清理旧 ProgId)", caught);
         }
     }
 
@@ -165,7 +191,7 @@ public static class FileAssociationHelper
             try
             {
                 using RegistryKey? extKey = classes.OpenSubKey(ext, writable: true);
-                if (extKey?.GetValue(string.Empty) as string == ProgId)
+                if (IsOursProgId(extKey?.GetValue(string.Empty) as string))
                     classes.DeleteSubKeyTree(ext, throwOnMissingSubKey: false);
             }
             catch (Exception caught)
@@ -177,6 +203,8 @@ public static class FileAssociationHelper
         try
         {
             classes.DeleteSubKeyTree(ProgId, throwOnMissingSubKey: false);
+            // 改名前的旧 ProgId 一起清掉，别在注册表里留一堆指向老 exe 的僵尸条目
+            classes.DeleteSubKeyTree(LegacyProgId, throwOnMissingSubKey: false);
         }
         catch (Exception caught)
         {
@@ -217,7 +245,7 @@ public static class FileAssociationHelper
                 return null;
             }
 
-            // 值形如 "C:\...\CelesteViewer.exe" "%1"：取引号里的那段
+            // 值形如 "C:\...\CelesteGallery.exe" "%1"：取引号里的那段
             string text = line.Trim();
             if (text.StartsWith('"'))
             {

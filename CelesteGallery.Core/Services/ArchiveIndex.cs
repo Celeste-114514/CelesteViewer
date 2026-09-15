@@ -5,7 +5,7 @@ using System.IO.Compression;
 using System.Runtime.InteropServices;
 using System.Text;
 
-namespace CelesteViewer.Services;
+namespace CelesteGallery.Services;
 
 /// <summary>
 /// 压缩包（zip / cbz）内翻图的支持层。

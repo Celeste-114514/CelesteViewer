@@ -3,7 +3,7 @@ using System.IO;
 using System.Security.Cryptography;
 using ImageMagick;
 
-namespace CelesteViewer.Services;
+namespace CelesteGallery.Services;
 
 /// <summary>
 /// 图片指纹。两种，各管各的：

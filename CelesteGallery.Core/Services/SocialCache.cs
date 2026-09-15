@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 
-namespace CelesteViewer.Services;
+namespace CelesteGallery.Services;
 
 /// <summary>
 /// 一个"社交软件缓存目录" —— 可以被收进图库、按来源分类的那种。
@@ -130,13 +130,48 @@ public static class SocialCacheDetector
 
         foreach (string seg in Segments(path!))
         {
-            if (seg.Equals("Tencent Files", StringComparison.OrdinalIgnoreCase)) return QQ;
-            if (seg.Equals("xwechat_files", StringComparison.OrdinalIgnoreCase)) return WeChat;
-            if (seg.Equals("WeChat Files", StringComparison.OrdinalIgnoreCase)) return WeChat;
-            if (seg.Equals("WXWork", StringComparison.OrdinalIgnoreCase)) return WeCom;
+            if (IsSourceMarker(seg)) return AppOfMarker(seg);
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// 取出路径里的"账号"那一段，用来区分同一个软件的多个账号目录
+    /// （本机就登过两个 QQ、两个企业微信）。
+    ///
+    /// 规则：标志目录名的**下一段**就是账号 ——
+    /// <c>…\Tencent Files\178237225\nt_qq\nt_data\Pic</c> → <c>178237225</c>；
+    /// <c>…\xwechat_files\wxid_ea0e…</c> → <c>wxid_ea0e…</c>。
+    ///
+    /// 拿不到就返回 null，调用方自己退回用目录名。
+    /// </summary>
+    public static string? AccountOf(string? path)
+    {
+        if (string.IsNullOrEmpty(path)) return null;
+
+        string? prev = null;
+        foreach (string seg in Segments(path!))
+        {
+            if (prev is not null && IsSourceMarker(prev)) return seg;
+            prev = seg;
+        }
+
+        return null;
+    }
+
+    /// <summary>这个目录名是不是某个软件用来标记"我的数据在这"的那一层。</summary>
+    private static bool IsSourceMarker(string seg)
+        => seg.Equals("Tencent Files", StringComparison.OrdinalIgnoreCase)
+        || seg.Equals("xwechat_files", StringComparison.OrdinalIgnoreCase)
+        || seg.Equals("WeChat Files", StringComparison.OrdinalIgnoreCase)
+        || seg.Equals("WXWork", StringComparison.OrdinalIgnoreCase);
+
+    private static string AppOfMarker(string seg)
+    {
+        if (seg.Equals("Tencent Files", StringComparison.OrdinalIgnoreCase)) return QQ;
+        if (seg.Equals("WXWork", StringComparison.OrdinalIgnoreCase)) return WeCom;
+        return WeChat;
     }
 
     /// <summary>

@@ -1,4 +1,4 @@
-namespace CelesteViewer.Views;
+namespace CelesteGallery.Views;
 
 /// <summary>
 /// 左侧树上一个"分组条目"（按日期、按相机…时挂的那些行）。

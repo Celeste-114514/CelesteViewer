@@ -4,7 +4,7 @@ using System.Threading.Tasks;
 using MetadataExtractor;
 using MetadataExtractor.Formats.Exif;
 
-namespace CelesteViewer.Services;
+namespace CelesteGallery.Services;
 
 /// <summary>
 /// 读图片的拍摄参数（EXIF）。

@@ -1,6 +1,6 @@
 using System;
 
-namespace CelesteViewer.Services;
+namespace CelesteGallery.Services;
 
 /// <summary>
 /// 背景怎么处理。三个动作共用同一张遮罩（见 <see cref="BackgroundMask"/>）：

@@ -2,7 +2,7 @@ using System;
 using System.IO;
 using ImageMagick;
 
-namespace CelesteViewer.Services;
+namespace CelesteGallery.Services;
 
 /// <summary>
 /// 图片编辑：旋转、翻面、改尺寸、另存。

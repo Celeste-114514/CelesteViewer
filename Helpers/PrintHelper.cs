@@ -8,7 +8,7 @@ using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI.Xaml.Printing;
 using Windows.Graphics.Printing;
 
-namespace CelesteViewer.Helpers;
+namespace CelesteGallery.Helpers;
 
 /// <summary>
 /// 打印当前这张图。
@@ -65,7 +65,7 @@ public sealed class PrintHelper
 
     private void OnPrintTaskRequested(PrintManager sender, PrintTaskRequestedEventArgs args)
     {
-        PrintTask task = args.Request.CreatePrintTask("CelesteViewer 打印图片", requested =>
+        PrintTask task = args.Request.CreatePrintTask("CelesteGallery 打印图片", requested =>
         {
             // 这一句必须调用，否则打印会被取消
             requested.SetSource(_source);

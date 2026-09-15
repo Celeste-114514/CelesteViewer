@@ -2,11 +2,11 @@ using System;
 using System.IO;
 using System.Runtime.InteropServices.WindowsRuntime;
 using System.Threading.Tasks;
-using CelesteViewer.Services;
+using CelesteGallery.Services;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.Graphics.Imaging;
 
-namespace CelesteViewer.Helpers;
+namespace CelesteGallery.Helpers;
 
 /// <summary>
 /// 把 Core 层解出来的裸像素（DecodedBitmap）变成 WinUI 能显示的 ImageSource。

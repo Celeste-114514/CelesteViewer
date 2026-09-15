@@ -8,7 +8,7 @@ using Windows.Graphics.Imaging;
 using Windows.Media.Ocr;
 using Windows.Storage.Streams;
 
-namespace CelesteViewer.Services;
+namespace CelesteGallery.Services;
 
 /// <summary>
 /// 一次识别的结果。成功和失败都走这个类型，调用方不用 try/catch。

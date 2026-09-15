@@ -2,14 +2,14 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <!-- 和 CelesteViewer.Core 同一个 TFM，否则引用不了它 -->
+    <!-- 和 CelesteGallery.Core 同一个 TFM，否则引用不了它 -->
     <TargetFramework>net9.0-windows10.0.26100.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <WindowsSdkPackageVersion>10.0.26100.87</WindowsSdkPackageVersion>
     <Platforms>x64</Platforms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
-    <RootNamespace>CelesteViewer.IndexHarness</RootNamespace>
+    <RootNamespace>CelesteGallery.IndexHarness</RootNamespace>
     <AssemblyName>IndexHarness</AssemblyName>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
@@ -29,7 +29,7 @@
   -->
 
   <ItemGroup>
-    <ProjectReference Include="..\..\CelesteViewer.Core\CelesteViewer.Core.csproj" />
+    <ProjectReference Include="..\..\CelesteGallery.Core\CelesteGallery.Core.csproj" />
 
     <!--
       主项目里的 LibraryIndexService 也要一起验：

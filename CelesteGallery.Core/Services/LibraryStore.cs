@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 
-namespace CelesteViewer.Services;
+namespace CelesteGallery.Services;
 
 /// <summary>
 /// 图库：用户自己收进来的文件夹清单（左侧目录树里"图库"那一组）。
@@ -13,7 +13,7 @@ namespace CelesteViewer.Services;
 /// 一个键存一个值。硬塞成 "A|B|C" 这种拼接串，遇到路径里带分隔符的就要转义，
 /// 属于自找麻烦。一行一个路径的纯文本最省事，出问题用记事本也能看能改。
 ///
-/// 存到 %LOCALAPPDATA%\CelesteViewer\library.txt。
+/// 存到 %LOCALAPPDATA%\CelesteGallery\library.txt。
 /// 所有读写都吞异常 —— 图库丢了最多是"要重新加一次"，不该让软件用不了。
 /// </summary>
 public static class LibraryStore
@@ -23,17 +23,7 @@ public static class LibraryStore
 
     private static readonly object Sync = new();
 
-    private static string FilePath
-    {
-        get
-        {
-            string dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "CelesteViewer");
-            try { Directory.CreateDirectory(dir); } catch { }
-            return Path.Combine(dir, "library.txt");
-        }
-    }
+    private static string FilePath => AppPaths.File("library.txt");
 
     /// <summary>
     /// 读出图库清单。

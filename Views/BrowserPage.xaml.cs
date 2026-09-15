@@ -6,8 +6,8 @@ using System.Linq;
 using System.Runtime.InteropServices.WindowsRuntime;
 using System.Threading;
 using System.Threading.Tasks;
-using CelesteViewer.Helpers;
-using CelesteViewer.Services;
+using CelesteGallery.Helpers;
+using CelesteGallery.Services;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -24,7 +24,7 @@ using Windows.Storage.Streams;
 // 不加别名会报"不明确的引用"
 using FileAttributes = System.IO.FileAttributes;
 
-namespace CelesteViewer.Views;
+namespace CelesteGallery.Views;
 
 /// <summary>
 /// 浏览界面（路线图第 3 步）：左边目录树，右边缩略图墙。
@@ -300,9 +300,14 @@ public sealed partial class BrowserPage : Page
     ///
     /// 结构：根节点是"图库"，下面挂用户收进来的文件夹；每个文件夹再展开就是它的子目录。
     ///
-    /// 收进来的目录记在 %LOCALAPPDATA%\CelesteViewer\library.txt，下次启动还在。
+    /// 收进来的目录记在 %LOCALAPPDATA%\CelesteGallery\library.txt，下次启动还在。
     /// 以前这里写死"桌面/图片/下载"三个根 —— 那样放别处的照片只能靠工具条上的按钮，
     /// 而且访问过的目录不会被记住，用户反过来问"为什么打开过的不在图库里"。
+    ///
+    /// 微信 / QQ / 企业微信的缓存目录**单独成一段**放在下面（加一行"社交缓存"标题 + 分隔线），
+    /// 节点名也换成应用名。理由：它们是十几万张的量级、名字又是哈希，
+    /// 跟桌面/图片/下载排在一起既不好认也不好找；分开放之后一眼就知道
+    /// "上面是我自己的文件夹，下面是软件缓存"。
     /// </summary>
     private void BuildFolderTree()
     {
@@ -316,32 +321,92 @@ public sealed partial class BrowserPage : Page
         FolderTree.RootNodes.Add(_libraryRoot);
 
         var folders = LibraryStore.Load();
-        int shown = 0;
 
+        // 先把记录分成"普通文件夹"和"社交缓存"两拨，顺序按 library.txt 原样。
+        // 拿不存在的先剔掉（移动硬盘没插、目录被删），但**不删记录** ——
+        // 盘插回来它还在，比"悄悄消失"友好得多。
+        var normal = new List<string>();
+        var social = new List<string>();
         foreach (string folder in folders)
         {
-            // 移动硬盘没插、目录被删掉的，这一轮先不显示。
-            // 注意**不删记录** —— 盘插回来它还在，比"悄悄消失"友好得多。
             if (!Directory.Exists(folder))
             {
                 StartupLog.Write($"BrowserPage: 图库条目暂时不可用 → {folder}");
                 continue;
             }
 
-            var node = MakeNode(folder, label: LibraryLabel(folder, folders), inLibrary: true);
-            _libraryNodes.Add(node);
-            _libraryRoot.Children.Add(node);
+            if (SocialCacheDetector.SourceOf(folder) is null) normal.Add(folder);
+            else social.Add(folder);
+        }
+
+        int shown = 0;
+
+        foreach (string folder in normal)
+        {
+            AddLibraryNode(folder, LibraryLabel(folder, folders));
             shown++;
+        }
+
+        if (social.Count > 0)
+        {
+            // 同一个应用登过多个账号时（本机有两个 QQ、两个企业微信），
+            // 光写"QQ"会出来两行一模一样的，把账号缀上才分得清谁是谁。
+            var sameAppCount = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (string folder in social)
+            {
+                string app = SocialCacheDetector.SourceOf(folder)!;
+                sameAppCount[app] = sameAppCount.GetValueOrDefault(app) + 1;
+            }
+
+            // 分区标题。Path 留空 → IsSection + IsRoot 都为真，
+            // 于是"点了不加载""不会去展开子目录"这两件事自动成立（走既有的 IsRoot 判断）。
+            _libraryRoot.Children.Add(new TreeViewNode
+            {
+                Content = new FolderNode { Path = "", Label = "社交缓存", IsSection = true },
+                HasUnrealizedChildren = false,
+            });
+
+            foreach (string folder in social)
+            {
+                string app = SocialCacheDetector.SourceOf(folder)!;
+                AddLibraryNode(folder, SocialCacheLabel(folder, app, sameAppCount[app]));
+                shown++;
+            }
         }
 
         _libraryRoot.IsExpanded = true;
 
-        StartupLog.Write($"BrowserPage: 图库 {shown} 个文件夹（记录 {folders.Count} 条）");
+        StartupLog.Write($"BrowserPage: 图库 {shown} 个文件夹（记录 {folders.Count} 条，其中社交缓存 {social.Count} 个）");
 
         // 重建之后把选中态挪回"当前正在看的目录"（没在看的就选第一个），
         // 否则重建会把选中高亮弄丢
         SelectTreeNodeForCurrentFolder();
     }
+
+    /// <summary>挂一个图库直接条目到根节点上，并记进 <see cref="_libraryNodes"/>。</summary>
+    private void AddLibraryNode(string folder, string label)
+    {
+        var node = MakeNode(folder, label: label, inLibrary: true);
+        _libraryNodes.Add(node);
+        _libraryRoot!.Children.Add(node);
+    }
+
+    /// <summary>
+    /// 社交缓存条目的名字：直接用应用名（QQ / 微信 / 企业微信），
+    /// 而不是目录名（"Pic""Cache""wxid_ea0e…"），否则左栏里根本认不出是什么。
+    /// 同一个应用有多个账号时把账号缀在后面。
+    /// </summary>
+    private static string SocialCacheLabel(string folder, string app, int sameAppCount)
+    {
+        if (sameAppCount <= 1) return app;
+
+        string acct = SocialCacheDetector.AccountOf(folder) ?? DisplayName(folder);
+        return $"{app} · {Shorten(acct)}";
+    }
+
+    /// <summary>太长的账号（微信的 wxid_xxx_xxxx 有二十多个字符）截一下，左栏放不下。</summary>
+    private static string Shorten(string s)
+        => s.Length <= 16 ? s : string.Concat(s.AsSpan(0, 15), "…");
 
     /// <summary>
     /// 按当前维度重建左侧树（查索引，不读磁盘）。
@@ -2517,7 +2582,7 @@ public sealed partial class BrowserPage : Page
         if (!e.DataView.Contains(StandardDataFormats.StorageItems)) return;
 
         e.AcceptedOperation = DataPackageOperation.Copy;
-        e.DragUIOverride.Caption = "用 CelesteViewer 打开";
+        e.DragUIOverride.Caption = "用 CelesteGallery 打开";
     }
 
     private async void Root_Drop(object sender, DragEventArgs e)

@@ -1,12 +1,12 @@
 using System;
 using System.IO;
-using CelesteViewer.Helpers;
-using CelesteViewer.Services;
-using CelesteViewer.Views;
+using CelesteGallery.Helpers;
+using CelesteGallery.Services;
+using CelesteGallery.Views;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 
-namespace CelesteViewer;
+namespace CelesteGallery;
 
 /// <summary>
 /// 主窗口 —— 缩略图墙。只管窗口级别的事：

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Window
-    x:Class="CelesteViewer.Views.FileAssociationWindow"
+    x:Class="CelesteGallery.Views.FileAssociationWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
@@ -56,7 +56,7 @@
                                    Foreground="#F0FFFFFF"/>
                         <TextBlock FontSize="12" Foreground="#B4FFFFFF"
                                    TextWrapping="Wrap" LineHeight="19"
-                                   Text="打开下面你希望交给 CelesteViewer 打开的格式；没打开的格式不会被改动，也不会抢走别的程序的关联。"/>
+                                   Text="打开下面你希望交给 CelesteGallery 打开的格式；没打开的格式不会被改动，也不会抢走别的程序的关联。"/>
                         <!-- 当前版本能不能做关联 / 关联指到了哪个程序：由 RefreshStatus() 填 -->
                         <TextBlock x:Name="StatusText" FontSize="11.5"
                                    TextWrapping="Wrap" LineHeight="18"

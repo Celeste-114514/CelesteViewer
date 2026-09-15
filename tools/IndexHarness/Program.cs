@@ -4,14 +4,14 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
-using CelesteViewer.Services;
+using CelesteGallery.Services;
 using ImageMagick;
 using Microsoft.Data.Sqlite;
-// PerceptualHash 在我的代码里是 CelesteViewer.Services.PerceptualHash；
+// PerceptualHash 在我的代码里是 CelesteGallery.Services.PerceptualHash；
 // ImageMagick 命名空间里也有一个同名类型，用别名把简单名指向我的那份，消除歧义。
-using PerceptualHash = CelesteViewer.Services.PerceptualHash;
+using PerceptualHash = CelesteGallery.Services.PerceptualHash;
 
-namespace CelesteViewer.IndexHarness;
+namespace CelesteGallery.IndexHarness;
 
 /// <summary>
 /// 图库索引实测。
@@ -56,6 +56,7 @@ internal static class Program
         UserData();
         Duplicates();
         SocialSource();
+        AppIdentity();
 
         Console.WriteLine();
         Console.WriteLine(_fail == 0 ? "==== 全部通过 ====" : $"==== 有 {_fail} 项失败 ====");
@@ -1175,6 +1176,32 @@ internal static class Program
         Check("识别：空路径不炸", SocialCacheDetector.SourceOf(null) is null
                               && SocialCacheDetector.SourceOf("") is null);
 
+        // ---- H1b: 账号识别（左栏里两个"QQ"要分得清谁是谁） ----
+        Check("账号：QQ 取 Tencent Files 下一段",
+              SocialCacheDetector.AccountOf(
+                  @"C:\Users\x\Documents\Tencent Files\178237225\nt_qq\nt_data\Pic") == "178237225");
+
+        Check("账号：微信 4.0 取 xwechat_files 下一段",
+              SocialCacheDetector.AccountOf(
+                  @"C:\Users\x\Documents\xwechat_files\wxid_ea0el7kdjbm222_014a") == "wxid_ea0el7kdjbm222_014a");
+
+        Check("账号：微信 3.x 取 WeChat Files 下一段",
+              SocialCacheDetector.AccountOf(
+                  @"C:\Users\x\Documents\WeChat Files\abc123\FileStorage\Image") == "abc123");
+
+        Check("账号：企业微信取 WXWork 下一段",
+              SocialCacheDetector.AccountOf(
+                  @"C:\Users\x\Documents\WXWork\1688855772687730\Cache\Image") == "1688855772687730");
+
+        // 关键一条：账号段必须是"标志目录名的**紧邻**下一段"。
+        // 用 FirstOrDefault 之类"找第一个数字段"的写法，遇到盘符以外还有数字的路径就会取错。
+        Check("账号：标志目录名后面没东西时返回 null（不得乱抓）",
+              SocialCacheDetector.AccountOf(@"C:\Users\x\Documents\Tencent Files") is null);
+
+        Check("账号：非社交路径返回 null",
+              SocialCacheDetector.AccountOf(@"D:\我的照片\Tencent Files 备份\a.jpg") is null
+              && SocialCacheDetector.AccountOf(null) is null);
+
         // ---- H2: 噪声（表情包 / 头像）过滤 ----
         Check("过滤：QQ 表情包算噪声",
               SocialCacheDetector.IsNoise(
@@ -1320,6 +1347,49 @@ internal static class Program
         Check("老库 v4→v5：按来源分组能用，老图归到「本地」",
               groups.Count == 1 && groups[0].Label == "本地" && groups[0].Count == 1,
               $"{groups.Count} 组 / {groups.Sum(g => g.Count)} 张");
+    }
+
+    // ==================== I. 应用身份 / 数据目录 ====================
+
+    /// <summary>
+    /// 盯住"应用名"和"数据目录"这两个常量。
+    ///
+    /// 为什么值得单开一段测两条字符串：2026-09-16 把应用从 CelesteViewer 改名成
+    /// CelesteGallery 时，全仓库的 `sed s/CelesteViewer/CelesteGallery/g` 把
+    /// <c>AppPaths.LegacyAppName</c> 也扫了一遍 —— 于是"老目录"和"新目录"
+    /// 算出来是同一个路径，搬家分支永远不成立，程序在新目录里从零建库，
+    /// 用户原来那份 library.db（评分 / 收藏 / 标签）直接成了孤儿。
+    ///
+    /// 症状还很隐蔽：程序一切正常、日志也不报错，只是"数据好像重置了"。
+    /// 所以这里把不变量钉死，下次改名再手滑会立刻红。
+    /// </summary>
+    private static void AppIdentity()
+    {
+        Console.WriteLine();
+        Console.WriteLine("==== I. 应用身份 / 数据目录 ====");
+        Console.WriteLine();
+
+        Check("应用名非空", !string.IsNullOrWhiteSpace(AppPaths.AppName), AppPaths.AppName);
+
+        // 最关键的一条：两个名字必须不一样，否则"从老目录搬家"这段代码等于不存在
+        Check("改名前的名字与新名字不相等（否则搬家逻辑会静默失效）",
+              !string.Equals(AppPaths.AppName, AppPaths.LegacyAppName, StringComparison.OrdinalIgnoreCase),
+              $"新 {AppPaths.AppName} / 旧 {AppPaths.LegacyAppName}");
+
+        Check("数据目录以应用名结尾",
+              AppPaths.DataDir.TrimEnd(Path.DirectorySeparatorChar)
+                     .EndsWith(AppPaths.AppName, StringComparison.OrdinalIgnoreCase),
+              AppPaths.DataDir);
+
+        Check("数据目录下的文件/子目录都落在数据目录里",
+              AppPaths.File("library.db").StartsWith(AppPaths.DataDir, StringComparison.OrdinalIgnoreCase)
+              && AppPaths.Dir("ThumbCache").StartsWith(AppPaths.DataDir, StringComparison.OrdinalIgnoreCase));
+
+        // 索引库、图库清单、设置、缓存四个文件必须指向同一个目录 ——
+        // 以前这四处的目录名是各写一遍的，漏改一处就会"数据劈成两个目录"。
+        string db = MediaIndex.DefaultPath;
+        Check("索引库落在数据目录里（不是散在别处）",
+              db.StartsWith(AppPaths.DataDir, StringComparison.OrdinalIgnoreCase), db);
     }
 
     /// <summary>造一张图：底色 fill，可选在 (bx,by) 画一个黑方块。写 PNG。</summary>

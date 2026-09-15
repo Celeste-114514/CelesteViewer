@@ -1,9 +1,9 @@
 ﻿using Microsoft.UI.Xaml;
 using System;
 using System.Threading.Tasks;
-using CelesteViewer.Services;
+using CelesteGallery.Services;
 
-namespace CelesteViewer
+namespace CelesteGallery
 {
     /// <summary>
     /// 应用程序入口。

@@ -5,8 +5,8 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Runtime.InteropServices.WindowsRuntime;
-using CelesteViewer.Helpers;
-using CelesteViewer.Services;
+using CelesteGallery.Helpers;
+using CelesteGallery.Services;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -25,7 +25,7 @@ using Windows.Storage.Streams;
 // 这里显式指向托管那个 —— 我们要的从来都是 BlockCopy
 using Buffer = System.Buffer;
 
-namespace CelesteViewer.Views;
+namespace CelesteGallery.Views;
 
 /// <summary>
 /// 单窗口看图界面（路线图第 2 步）。
@@ -6032,7 +6032,7 @@ public sealed partial class ViewerPage : Page
     private void Root_DragOver(object sender, DragEventArgs e)
     {
         e.AcceptedOperation = DataPackageOperation.Copy;
-        e.DragUIOverride.Caption = "用 CelesteViewer 打开";
+        e.DragUIOverride.Caption = "用 CelesteGallery 打开";
     }
 
     private async void Root_Drop(object sender, DragEventArgs e)

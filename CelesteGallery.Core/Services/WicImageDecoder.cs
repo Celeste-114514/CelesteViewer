@@ -5,7 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Windows.Graphics.Imaging;
 
-namespace CelesteViewer.Services;
+namespace CelesteGallery.Services;
 
 /// <summary>
 /// 主解码器：Windows 自带的 WIC（Windows Imaging Component）。

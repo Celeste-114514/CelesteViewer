@@ -2,15 +2,15 @@
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
-using CelesteViewer.Helpers;
-using CelesteViewer.Services;
+using CelesteGallery.Helpers;
+using CelesteGallery.Services;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Input;
 using Windows.Graphics;
 
-namespace CelesteViewer.Views;
+namespace CelesteGallery.Views;
 
 /// <summary>
 /// 「关于」窗口。
@@ -81,7 +81,7 @@ public sealed partial class AboutWindow : Window
         InitializeComponent();
 
         _appWindow = AppWindow;
-        Title = "关于 CelesteViewer";
+        Title = "关于 CelesteGallery";
         AppIcon.ApplyToWindow(_appWindow);
 
         ConfigureWindowChrome();
@@ -192,7 +192,7 @@ public sealed partial class AboutWindow : Window
         VersionText.Text = "版本 " + version;
         UpdateVersionText.Text = "当前版本 " + version;
         BuildTimeText.Text = ReadBuildTime(asm);
-        CopyrightText.Text = "CelesteViewer · 本地图片查看器\n与 CelesteMusicPlayer 同一套设计语言";
+        CopyrightText.Text = "CelesteGallery · 本地图片查看器\n与 CelesteMusicPlayer 同一套设计语言";
 
         // 启动期如果已经自动检查出新版，打开关于页直接显示，不用用户再点一次。
         UpdateChecker.UpdateInfo? cached = UpdateChecker.LatestAvailable;
@@ -353,8 +353,8 @@ public sealed partial class AboutWindow : Window
         DownloadUpdateButton.IsEnabled = false;
 
         string fileName = System.IO.Path.GetFileName(new Uri(url).AbsolutePath);
-        if (string.IsNullOrWhiteSpace(fileName)) fileName = "CelesteViewer-Setup.exe";
-        string tmpDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "CelesteViewerUpdate");
+        if (string.IsNullOrWhiteSpace(fileName)) fileName = "CelesteGallery-Setup.exe";
+        string tmpDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "CelesteGalleryUpdate");
         string target = System.IO.Path.Combine(tmpDir, fileName);
 
         try
@@ -369,7 +369,7 @@ public sealed partial class AboutWindow : Window
 
             using var http = new System.Net.Http.HttpClient();
             http.Timeout = TimeSpan.FromMinutes(30);
-            http.DefaultRequestHeaders.UserAgent.ParseAdd("CelesteViewer/" + UpdateChecker.CurrentVersionText());
+            http.DefaultRequestHeaders.UserAgent.ParseAdd("CelesteGallery/" + UpdateChecker.CurrentVersionText());
 
             using var response = await http.GetAsync(url, System.Net.Http.HttpCompletionOption.ResponseHeadersRead);
             response.EnsureSuccessStatusCode();

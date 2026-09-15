@@ -3,7 +3,7 @@ using System.IO;
 using System.Text;
 using System.Threading;
 
-namespace CelesteViewer.Services;
+namespace CelesteGallery.Services;
 
 /// <summary>
 /// 「黑匣子」日志。
@@ -16,7 +16,7 @@ namespace CelesteViewer.Services;
 ///   - 每次写入立刻 Flush，保证崩溃前的内容真正落盘
 ///   - 不依赖任何第三方库，只用了 System.IO
 ///
-/// 日志位置：%LOCALAPPDATA%\CelesteViewer\startup.log
+/// 日志位置：%LOCALAPPDATA%\CelesteGallery\startup.log（路径由 <see cref="AppPaths"/> 决定）
 /// </summary>
 public static class StartupLog
 {
@@ -32,16 +32,12 @@ public static class StartupLog
 
             try
             {
-                string dir = System.IO.Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "CelesteViewer");
-                Directory.CreateDirectory(dir);
-                _path = System.IO.Path.Combine(dir, "startup.log");
+                _path = AppPaths.File("startup.log");
             }
             catch
             {
                 // 连日志目录都建不了（极端情况），退到临时目录
-                _path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "CelesteViewer-startup.log");
+                _path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "CelesteGallery-startup.log");
             }
 
             return _path;
@@ -141,6 +137,11 @@ public static class StartupLog
                 Write($"64-bit    : {Environment.Is64BitProcess}");
                 Write($"命令行    : {Environment.CommandLine}");
                 Write($"工作目录  : {Environment.CurrentDirectory}");
+                // 数据目录每次启动都记一笔：改名之后要能一眼看出
+                // "到底在写老目录还是新目录"，以及这次是不是刚搬过来的。
+                Write(AppPaths.MigratedFromLegacy
+                    ? $"数据目录  : {AppPaths.DataDir}（本次启动已从 {AppPaths.LegacyAppName} 迁移过来）"
+                    : $"数据目录  : {AppPaths.DataDir}");
 
                 // 刻意不去 typeof(Microsoft.UI.Xaml.Application)：
                 // 那会加载 WinRT 投影类型，而「日志本身把程序搞崩」是最糟的情况。

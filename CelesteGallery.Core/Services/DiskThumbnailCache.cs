@@ -7,7 +7,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace CelesteViewer.Services;
+namespace CelesteGallery.Services;
 
 /// <summary>
 /// 磁盘缩略图缓存 —— 「第二次打开同一批图，缩略图瞬间全出来」靠的就是它。
@@ -57,13 +57,11 @@ public sealed class DiskThumbnailCache
     private int _hits;
     private int _misses;
 
-    /// <param name="directory">缓存目录，默认 %LOCALAPPDATA%\CelesteViewer\ThumbCache。</param>
+    /// <param name="directory">缓存目录，默认 %LOCALAPPDATA%\CelesteGallery\ThumbCache。</param>
     /// <param name="maxBytes">占用上限，默认 512MB。</param>
     public DiskThumbnailCache(string? directory = null, long maxBytes = 512L * 1024 * 1024)
     {
-        _dir = directory ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "CelesteViewer", "ThumbCache");
+        _dir = directory ?? AppPaths.Dir("ThumbCache");
         _maxBytes = maxBytes;
 
         try { Directory.CreateDirectory(_dir); }

@@ -16,7 +16,7 @@
   <mp:PhoneIdentity PhoneProductId="35f186f9-6086-42ea-bc4d-ea2df5229a01" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>
 
   <Properties>
-    <DisplayName>CelesteViewer</DisplayName>
+    <DisplayName>CelesteGallery</DisplayName>
     <PublisherDisplayName>admin</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
@@ -35,8 +35,8 @@
       Executable="$targetnametoken$.exe"
       EntryPoint="$targetentrypoint$">
       <uap:VisualElements
-        DisplayName="CelesteViewer"
-        Description="CelesteViewer"
+        DisplayName="CelesteGallery"
+        Description="CelesteGallery"
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png">

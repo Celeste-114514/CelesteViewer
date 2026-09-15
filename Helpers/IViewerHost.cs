@@ -1,7 +1,7 @@
 using System;
 using Microsoft.UI.Xaml;
 
-namespace CelesteViewer.Helpers;
+namespace CelesteGallery.Helpers;
 
 /// <summary>
 /// 承载单图查看页面的那一层（可能是主窗口，也可能是独立看图窗口）。
