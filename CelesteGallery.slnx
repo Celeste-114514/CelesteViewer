@@ -1,8 +1,14 @@
 <Solution>
+  <!--
+    ⚠️ 平台顺序不能随便排：x64 必须在第一个。
+    这份清单同时充当 VS 的"默认解决方案平台"来源 —— 没有 .vs 缓存时（首次打开、
+    或清过缓存之后）VS 取的就是这里的第一个，而不是 Any CPU（本项目没有 AnyCPU）。
+    以前 ARM64 排第一，清完缓存重开就会默认挑 ARM64，构建直接失败。
+  -->
   <Configurations>
-    <Platform Name="ARM64" />
     <Platform Name="x64" />
     <Platform Name="x86" />
+    <Platform Name="ARM64" />
   </Configurations>
   <Project Path="CelesteGallery.csproj">
     <Platform Solution="*|ARM64" Project="ARM64" />
