@@ -280,24 +280,6 @@ public sealed partial class ViewerPage : Page
         await ShowCurrentAsync();
     }
 
-    /// <summary>
-    /// 右上角格式角标：按当前图片的扩展名显示（JPG / PNG / WEBP …）。
-    /// 没图（或拿不到扩展名）就藏起来。放映退出后也会回来（见 ExitSlideMode）。
-    /// </summary>
-    private void UpdateFormatBadge()
-    {
-        var label = FormatLabelOf(_index?.CurrentPath);
-        FormatText.Text = label;
-        FormatBadge.Visibility = label.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
-    }
-
-    private static string FormatLabelOf(string? path)
-    {
-        if (string.IsNullOrEmpty(path)) return "";
-        var ext = System.IO.Path.GetExtension(path);
-        return ext.Length > 1 ? ext.Substring(1).ToUpperInvariant() : "";
-    }
-
     private async Task ShowCurrentAsync()
     {
         // 换图就退出裁剪：选框是按"这一张"算的，换张图还留着毫无意义
@@ -324,7 +306,6 @@ public sealed partial class ViewerPage : Page
         CounterText.Text = _index.Count > 0 ? $"{_index.Position} / {_index.Count}" : "";
         SlideCounterText.Text = CounterText.Text;
         EmptyState.Visibility = Visibility.Collapsed;
-        UpdateFormatBadge();
 
         // 文字面板里的结果是**上一张**的，留着会误导 —— 换图就收起来，
         // 想看新图上的字再按一次 T
@@ -565,7 +546,6 @@ public sealed partial class ViewerPage : Page
         TitleText.Text = "";
         TitleDot.Visibility = Visibility.Collapsed;
         SizeText.Text = "";
-        FormatBadge.Visibility = Visibility.Collapsed;
         CounterText.Text = "";
         EmptyText.Text = message;
         EmptyState.Visibility = Visibility.Visible;
@@ -2062,7 +2042,6 @@ public sealed partial class ViewerPage : Page
         // 收起"工具"，只留画面
         TitleBar.Visibility = Visibility.Collapsed;
         BottomBar.Visibility = Visibility.Collapsed;
-        FormatBadge.Visibility = Visibility.Collapsed;
         SlideLayer.Visibility = Visibility.Visible;
 
         UpdateSlideIntervalButtons();
@@ -2096,7 +2075,6 @@ public sealed partial class ViewerPage : Page
         SlideBar.Opacity = 1;        // 复位，下次放映第一帧就是看得见的
         TitleBar.Visibility = Visibility.Visible;
         BottomBar.Visibility = Visibility.Visible;
-        UpdateFormatBadge();         // 还在看图就把它亮回来（放映期间藏了）
 
         if (!_slideWasFullScreen) SafeHost?.ToggleFullScreen();
 

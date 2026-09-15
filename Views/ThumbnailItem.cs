@@ -24,6 +24,23 @@ public sealed class ThumbnailItem : INotifyPropertyChanged
     public required string Path { get; init; }
     public required string FileName { get; init; }
 
+    /// <summary>文件格式（扩展名大写，如 JPG / PNG / WEBP）。缩略图墙右上角角标用。</summary>
+    public string Format
+    {
+        get
+        {
+            var ext = System.IO.Path.GetExtension(Path);
+            return ext.Length > 1 ? ext.Substring(1).ToUpperInvariant() : "";
+        }
+    }
+
+    /// <summary>
+    /// 格式角标：有格式、且这张没被多选勾选时才显示（右上角，和多选勾错开，
+    /// 不然两个都挤在右上角会叠在一起）。
+    /// </summary>
+    public Visibility FormatBadgeVisibility =>
+        (Format.Length > 0 && !_multiSelected) ? Visibility.Visible : Visibility.Collapsed;
+
     /// <summary>
     /// 这张图相对于"当前正在浏览的目录"坐在哪个子目录里。
     /// 空字符串 = 就在当前目录下。只在开启"包含子文件夹"时才会被填上，
@@ -91,6 +108,7 @@ public sealed class ThumbnailItem : INotifyPropertyChanged
             _multiSelected = value;
             Raise(nameof(MultiSelectedVisibility));
             Raise(nameof(SelectionOpacity));
+            Raise(nameof(FormatBadgeVisibility));
         }
     }
 
