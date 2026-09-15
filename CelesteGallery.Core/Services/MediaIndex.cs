@@ -168,8 +168,12 @@ public sealed class MediaIndex : IDisposable
     ///
     /// 注意 v3 之后**不能再靠删表重建来升版**了 —— 库里开始存用户数据
     /// （评分 / 收藏 / 标签），删表等于把人家的评分悄悄清空。见 <see cref="MigrateFrom"/>。
+    ///
+    /// v6（2026-09-16）：加 <c>Edits</c> 列 —— 非破坏性编辑的参数（路线图第 6 步）。
+    /// 和评分一样属于**用户数据**：原图一个字节没动，参数就是全部的编辑结果，
+    /// 丢了就真的回不来了（重扫磁盘只能拿回尺寸和 EXIF）。
     /// </summary>
-    private const int SchemaVersion = 5;
+    private const int SchemaVersion = 6;
 
     private readonly SqliteConnection _conn;
     private readonly object _gate = new();
@@ -264,6 +268,7 @@ public sealed class MediaIndex : IDisposable
                 Md5           TEXT    NULL,
                 PHash         TEXT    NULL,
                 Source        TEXT    NULL,
+                Edits         TEXT    NULL,
                 IndexedAt     INTEGER NOT NULL DEFAULT 0
             );");
 
@@ -345,6 +350,15 @@ public sealed class MediaIndex : IDisposable
         {
             if (!ColumnExists("Media", "Source"))
                 Exec("ALTER TABLE Media ADD COLUMN Source TEXT NULL;");
+        }
+
+        // 5 → 6：加"编辑参数"列（第 6 步的非破坏性编辑）。
+        // 存的是 PhotoEdits.Serialize() 出来的一行文本，没编辑过就是 NULL。
+        // 老库升上来全是 NULL = 所有图都是原样，行为跟升级前一致。
+        if (from < 6)
+        {
+            if (!ColumnExists("Media", "Edits"))
+                Exec("ALTER TABLE Media ADD COLUMN Edits TEXT NULL;");
         }
     }
 
@@ -830,6 +844,91 @@ public sealed class MediaIndex : IDisposable
     }
 
     public bool IsFavorite(string path) => QueryInt("Favorite", path) == 1;
+
+    // ===== 非破坏性编辑参数（第 6 步）=====
+    //
+    // 和评分 / 收藏 / 标签一样属于**用户数据**：原图一个字节都没动，
+    // 这几列就是全部的编辑结果。丢了重扫磁盘是找不回来的 ——
+    // 所以升表结构时只能 ALTER 加列，绝不能重建。
+
+    /// <summary>读这张图的编辑参数。没编辑过返回"空的参数"（不是 null）。</summary>
+    public PhotoEdits GetEdits(string path) => PhotoEdits.Parse(QueryText("Edits", path));
+
+    /// <summary>
+    /// 写这张图的编辑参数。传 <c>null</c> 或者"等于没改"的参数 = **清除编辑**，
+    /// 库里存 NULL（而不是空串）—— 这样"这张图改过没有"用一个
+    /// <c>WHERE Edits IS NOT NULL</c> 就能问出来，不用管空串。
+    /// </summary>
+    public void SetEdits(string path, PhotoEdits? edits)
+    {
+        string? text = edits?.Serialize();
+        if (string.IsNullOrEmpty(text)) text = null;
+
+        lock (_gate)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "UPDATE Media SET Edits = $e WHERE Path = $p;";
+            cmd.Parameters.AddWithValue("$e", (object?)text ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$p", path);
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>清除这张图的编辑（回到原样）。</summary>
+    public void ClearEdits(string path) => SetEdits(path, null);
+
+    /// <summary>改过的图有多少张。界面上一句"已编辑 N 张"用得上。</summary>
+    public int CountEdited()
+    {
+        lock (_gate)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM Media WHERE Edits IS NOT NULL AND Edits <> '';";
+            object? v = cmd.ExecuteScalar();
+            return v is null or DBNull ? 0 : Convert.ToInt32(v);
+        }
+    }
+
+    /// <summary>
+    /// 一次把所有"编辑过的图"读出来（路径 → 参数文本）。
+    ///
+    /// 为什么需要批量版：缩略图墙要按编辑参数渲染每一格，
+    /// 一格一次查库在几千张的目录上就是几千次往返。
+    /// 只返回改过的那些（通常是零条或几条），一次查询就够。
+    /// </summary>
+    public Dictionary<string, string> LoadAllEdits()
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        lock (_gate)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT Path, Edits FROM Media WHERE Edits IS NOT NULL AND Edits <> '';";
+
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                if (r.IsDBNull(0) || r.IsDBNull(1)) continue;
+                result[r.GetString(0)] = r.GetString(1);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>取单个文本列的小工具。</summary>
+    private string? QueryText(string column, string path)
+    {
+        lock (_gate)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = $"SELECT {column} FROM Media WHERE Path = $p;";
+            cmd.Parameters.AddWithValue("$p", path);
+
+            object? v = cmd.ExecuteScalar();
+            return v is null or DBNull ? null : Convert.ToString(v);
+        }
+    }
 
     /// <summary>取单个整数列的小工具（评分、收藏都是这种）。</summary>
     private int QueryInt(string column, string path)

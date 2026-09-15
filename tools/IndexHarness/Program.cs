@@ -123,6 +123,506 @@ internal static class Program
         if (!ok) _fail++;
     }
 
+    /// <summary>
+    /// 浮点比较。归一化比例是"像素 ÷ 尺寸"算出来的，会有尾数，
+    /// 拿 <c>==</c> 比会时通时不通（同一份代码换台机器就变）。
+    /// </summary>
+    private static bool Near(double a, double b, double tolerance = 1e-9)
+        => Math.Abs(a - b) < tolerance;
+
+    // ==================== K. 非破坏性编辑（路线图第 6 步） ====================
+
+    /// <summary>
+    /// 造一张"每像素 R 通道 = 序号（从 1 起）"的图。
+    /// 用来验证旋转 / 翻转 / 裁剪有没有把像素搬到正确的格子上 ——
+    /// 用纯色图是测不出来的（搬错位置也是同一个颜色）。
+    /// </summary>
+    private static byte[] MakeIndexed(int width, int height)
+    {
+        var px = new byte[width * height * 4];
+        for (int i = 0; i < width * height; i++)
+        {
+            px[i * 4 + 2] = (byte)(i + 1);    // R = 序号（1 起：0 留给"没写进去"）
+            px[i * 4 + 3] = 255;
+        }
+        return px;
+    }
+
+    private static DecodedBitmap Bmp(byte[] pixels, int width, int height, bool premultiplied = false)
+        => new()
+        {
+            Pixels = pixels,
+            PixelWidth = width,
+            PixelHeight = height,
+            Premultiplied = premultiplied,
+            DecoderName = "test",
+        };
+
+    /// <summary>取 (x, y) 处像素的 R 分量。</summary>
+    private static int RAt(DecodedBitmap bmp, int x, int y)
+        => bmp.Pixels[(y * bmp.PixelWidth + x) * 4 + 2];
+
+    private static void EditRender()
+    {
+        Console.WriteLine();
+        Console.WriteLine("==== K. 非破坏性编辑：渲染 ====");
+        Console.WriteLine();
+
+        // ---- K1: 没编辑就原样返回（同一个对象，不白拷一遍像素）----
+        var src = Bmp(MakeIndexed(4, 3), 4, 3);
+        Check("无参数：返回同一个对象", ReferenceEquals(EditRenderer.Apply(src, null), src));
+        Check("空参数：返回同一个对象", ReferenceEquals(EditRenderer.Apply(src, new PhotoEdits()), src));
+
+        // ---- K2: 旋转 90°（顺时针），宽高互换 + 像素落点 ----
+        // 3×2 的原图（数字是 R 分量）：
+        //    1 2 3
+        //    4 5 6
+        // 顺时针 90° 之后应该是 2×3：
+        //    4 1
+        //    5 2
+        //    6 3
+        var r90 = EditRenderer.Apply(Bmp(MakeIndexed(3, 2), 3, 2),
+                                     new PhotoEdits { Rotation = 90 });
+        Check("旋转 90：宽高互换（3×2 → 2×3）",
+              r90.PixelWidth == 2 && r90.PixelHeight == 3,
+              $"{r90.PixelWidth}×{r90.PixelHeight}");
+        Check("旋转 90：四角落点正确（左上→右上、左下→左上）",
+              RAt(r90, 1, 0) == 1 && RAt(r90, 0, 0) == 4
+              && RAt(r90, 1, 2) == 3 && RAt(r90, 0, 2) == 6,
+              $"{RAt(r90, 1, 0)},{RAt(r90, 0, 0)},{RAt(r90, 1, 2)},{RAt(r90, 0, 2)}");
+
+        // ---- K3: 旋转 180 / 270 / 360 ----
+        var r180 = EditRenderer.Apply(Bmp(MakeIndexed(3, 2), 3, 2),
+                                      new PhotoEdits { Rotation = 180 });
+        Check("旋转 180：尺寸不变、完全倒序（左上↔右下）",
+              r180.PixelWidth == 3 && r180.PixelHeight == 2
+              && RAt(r180, 2, 1) == 1 && RAt(r180, 0, 0) == 6);
+
+        var r270 = EditRenderer.Apply(Bmp(MakeIndexed(3, 2), 3, 2),
+                                      new PhotoEdits { Rotation = 270 });
+        // 逆时针 90° 之后：
+        //    3 6
+        //    2 5
+        //    1 4
+        Check("旋转 270：左上角转到左下角（左上 = 3、右下 = 4）",
+              r270.PixelWidth == 2 && r270.PixelHeight == 3
+              && RAt(r270, 0, 2) == 1 && RAt(r270, 0, 0) == 3 && RAt(r270, 1, 2) == 4,
+              $"{r270.PixelWidth}×{r270.PixelHeight} → 左下 {RAt(r270, 0, 2)} / 左上 {RAt(r270, 0, 0)}");
+
+        // 两次 90 = 一次 180（最容易验出"转反了"的一条）
+        var twice = EditRenderer.Apply(
+            EditRenderer.Apply(Bmp(MakeIndexed(3, 2), 3, 2), new PhotoEdits { Rotation = 90 }),
+            new PhotoEdits { Rotation = 90 });
+        Check("旋转 90 两次 = 旋转 180",
+              twice.PixelWidth == r180.PixelWidth && twice.PixelHeight == r180.PixelHeight
+              && twice.Pixels.SequenceEqual(r180.Pixels));
+
+        Check("旋转 360：等于没转（返回原对象）",
+              ReferenceEquals(EditRenderer.Apply(src, new PhotoEdits { Rotation = 360 }), src));
+
+        // ---- K4: 翻转 ----
+        var flipBase = MakeIndexed(3, 2);
+        var fh = EditRenderer.Apply(Bmp(flipBase, 3, 2), new PhotoEdits { FlipH = true });
+        Check("左右翻转：第 0 列与最后一列互换",
+              RAt(fh, 2, 0) == 1 && RAt(fh, 0, 0) == 3 && RAt(fh, 0, 1) == 6);
+
+        var fv = EditRenderer.Apply(Bmp(MakeIndexed(3, 2), 3, 2), new PhotoEdits { FlipV = true });
+        Check("上下翻转：第 0 行与最后一行互换",
+              RAt(fv, 0, 1) == 1 && RAt(fv, 0, 0) == 4);
+
+        var fhh = EditRenderer.Apply(fh, new PhotoEdits { FlipH = true });
+        Check("左右翻转两次 = 原图", fhh.Pixels.SequenceEqual(flipBase));
+
+        // ---- K5: 裁剪（归一化坐标，相对"几何变换之后"的图）----
+        var crop = EditRenderer.Apply(Bmp(MakeIndexed(4, 4), 4, 4),
+                                      new PhotoEdits { CropX = 0.5, CropY = 0.5, CropW = 0.5, CropH = 0.5 });
+        Check("裁剪：尺寸减半（4×4 → 2×2）",
+              crop.PixelWidth == 2 && crop.PixelHeight == 2,
+              $"{crop.PixelWidth}×{crop.PixelHeight}");
+        // 4×4 序号 1..16，右下角 2×2 的左上角是序号 11（第 3 行第 3 列）
+        Check("裁剪：取的是右下角那块（左上角序号 = 11）", RAt(crop, 0, 0) == 11, RAt(crop, 0, 0).ToString());
+
+        var noCropSrc = Bmp(MakeIndexed(4, 4), 4, 4);
+        Check("裁剪：整图参数不会白拷一份像素",
+              ReferenceEquals(
+                  EditRenderer.Apply(noCropSrc, new PhotoEdits { CropX = 0, CropY = 0, CropW = 1, CropH = 1 }),
+                  noCropSrc));
+
+        // 越界裁剪：规整会把框往里挪（而不是抛异常或裁出负数）
+        var over = EditRenderer.Apply(Bmp(MakeIndexed(4, 4), 4, 4),
+                                      new PhotoEdits { CropX = 0.9, CropY = 0.9, CropW = 0.5, CropH = 0.5 });
+        Check("裁剪：越界参数不崩、尺寸合法",
+              over.PixelWidth is >= 1 and <= 4 && over.PixelHeight is >= 1 and <= 4,
+              $"{over.PixelWidth}×{over.PixelHeight}");
+
+        var corner = EditRenderer.Apply(Bmp(MakeIndexed(4, 4), 4, 4),
+                                        new PhotoEdits { CropX = 0.75, CropY = 0.75, CropW = 0.25, CropH = 0.25 });
+        Check("裁剪：右下角 1×1（序号 16）",
+              corner.PixelWidth == 1 && corner.PixelHeight == 1 && RAt(corner, 0, 0) == 16,
+              $"{corner.PixelWidth}×{corner.PixelHeight} / {RAt(corner, 0, 0)}");
+
+        // ---- K6: 旋转 + 裁剪的顺序（先几何后裁剪）----
+        // 3×2 顺时针 90° 之后是 2×3：
+        //    4 1
+        //    5 2
+        //    6 3
+        // 再取上半（归一化 y 0~0.5，即第 0 行）应该得到 "4 1"
+        var rc = EditRenderer.Apply(Bmp(MakeIndexed(3, 2), 3, 2),
+                                    new PhotoEdits
+                                    {
+                                        Rotation = 90,
+                                        CropX = 0, CropY = 0, CropW = 1, CropH = 1.0 / 3.0,
+                                    });
+        Check("旋转 + 裁剪：裁剪作用在旋转后的图上（拿到第 0 行 4 1）",
+              rc.PixelWidth == 2 && rc.PixelHeight == 1
+              && RAt(rc, 0, 0) == 4 && RAt(rc, 1, 0) == 1,
+              $"{rc.PixelWidth}×{rc.PixelHeight} → {RAt(rc, 0, 0)},{RAt(rc, 1, 0)}");
+
+        // ---- K7: 非破坏性 —— 原像素一个字节都不能变 ----
+        byte[] original = MakeIndexed(8, 8);
+        byte[] snapshot = (byte[])original.Clone();
+        EditRenderer.Apply(Bmp(original, 8, 8), new PhotoEdits
+        {
+            Rotation = 90,
+            FlipH = true,
+            CropX = 0.1,
+            CropY = 0.1,
+            CropW = 0.5,
+            CropH = 0.5,
+            Brightness = 20,
+        });
+        Check("非破坏性：Apply 之后调用方的像素数组完全没动", original.SequenceEqual(snapshot));
+
+        // 上面那条用例带了旋转（旋转本来就会新建数组），所以**单独**再盯着
+        // "只有调色"和"只有翻转"这两种情况 —— 这两步是原地改的，
+        // 忘了先克隆就会把调用方的原图就地改掉。
+        // （2026-09-16 就是这条抓到了真 bug：先亮度 +20 再 -20，第二次拿到的是
+        //   已经被改过的数组，减暗于是"没反应"。）
+        byte[] toneOnly = MakeBgra(8, 8, 128, 128, 128);
+        byte[] toneSnapshot = (byte[])toneOnly.Clone();
+        EditRenderer.Apply(Bmp(toneOnly, 8, 8), new PhotoEdits { Brightness = 30 });
+        Check("非破坏性：只调色（无任何几何变换）也不能改到原数组",
+              toneOnly.SequenceEqual(toneSnapshot));
+
+        byte[] flipOnly = MakeIndexed(8, 8);
+        byte[] flipSnapshot = (byte[])flipOnly.Clone();
+        EditRenderer.Apply(Bmp(flipOnly, 8, 8), new PhotoEdits { FlipH = true });
+        Check("非破坏性：只翻转也不能改到原数组", flipOnly.SequenceEqual(flipSnapshot));
+
+        byte[] flipTone = MakeBgra(8, 8, 128, 128, 128);
+        byte[] flipToneSnapshot = (byte[])flipTone.Clone();
+        EditRenderer.Apply(Bmp(flipTone, 8, 8),
+                          new PhotoEdits { FlipV = true, Saturation = 40 });
+        Check("非破坏性：翻转 + 调色组合也不能改到原数组",
+              flipTone.SequenceEqual(flipToneSnapshot));
+
+        // ---- K8: 调色 ----
+        var gray = Bmp(MakeBgra(8, 8, 128, 128, 128), 8, 8);
+        var brighter = EditRenderer.Apply(gray, new PhotoEdits { Brightness = 20 });
+        Check("亮度 +20：中灰 128 变亮", RAt(brighter, 0, 0) > 128, RAt(brighter, 0, 0).ToString());
+
+        var darker = EditRenderer.Apply(gray, new PhotoEdits { Brightness = -20 });
+        Check("亮度 -20：中灰 128 变暗", RAt(darker, 0, 0) < 128, RAt(darker, 0, 0).ToString());
+
+        // 对比度 -100 → 斜率 0 → 所有像素都被压成同一档（128）
+        var flat = EditRenderer.Apply(Bmp(MakeBgra(4, 4, 30, 128, 220), 4, 4),
+                                      new PhotoEdits { Contrast = -100 });
+        Check("对比度 -100：所有通道被压到同一档（128）",
+              RAt(flat, 0, 0) == 128 && flat.Pixels[0] == 128 && flat.Pixels[1] == 128,
+              $"{flat.Pixels[0]},{flat.Pixels[1]},{RAt(flat, 0, 0)}");
+
+        // 饱和度 -100 → 全灰（R = G = B）
+        var mono = EditRenderer.Apply(Bmp(MakeBgra(4, 4, 30, 128, 220), 4, 4),
+                                      new PhotoEdits { Saturation = -100 });
+        Check("饱和度 -100：变成灰度（B = G = R）",
+              mono.Pixels[0] == mono.Pixels[1] && mono.Pixels[1] == mono.Pixels[2],
+              $"{mono.Pixels[0]},{mono.Pixels[1]},{mono.Pixels[2]}");
+
+        // 色温 +60 → 加红减蓝
+        var warm = EditRenderer.Apply(Bmp(MakeBgra(4, 4, 100, 100, 100), 4, 4),
+                                      new PhotoEdits { Temperature = 60 });
+        Check("色温 +60：R 变大、B 变小（偏暖）",
+              warm.Pixels[2] > 100 && warm.Pixels[0] < 100,
+              $"B={warm.Pixels[0]} R={warm.Pixels[2]}");
+
+        var cool = EditRenderer.Apply(Bmp(MakeBgra(4, 4, 100, 100, 100), 4, 4),
+                                      new PhotoEdits { Temperature = -60 });
+        Check("色温 -60：R 变小、B 变大（偏冷）",
+              cool.Pixels[2] < 100 && cool.Pixels[0] > 100,
+              $"B={cool.Pixels[0]} R={cool.Pixels[2]}");
+
+        // ---- K9: 调色不许碰 alpha ----
+        var withAlpha = EditRenderer.Apply(Bmp(MakeBgra(4, 4, 100, 100, 100, a: 200), 4, 4),
+                                           new PhotoEdits { Brightness = 50, Saturation = 50 });
+        Check("调色不改 alpha（仍然是 200）", withAlpha.Pixels[3] == 200, withAlpha.Pixels[3].ToString());
+
+        // ---- K10: 全透明像素不参与调色 ----
+        var clear = EditRenderer.Apply(Bmp(MakeBgra(4, 4, 0, 0, 0, a: 0), 4, 4),
+                                       new PhotoEdits { Brightness = 100 });
+        Check("全透明像素：调色跳过（RGB 仍是 0）",
+              clear.Pixels[0] == 0 && clear.Pixels[2] == 0);
+
+        // ---- K11: 预乘 alpha 的半透明像素跳过调色 ----
+        // 预乘的图里 RGB 已经乘过 alpha，单独改 RGB 会让边缘出现脏色
+        var pre = EditRenderer.Apply(
+            Bmp(MakeBgra(4, 4, 40, 40, 40, a: 128), 4, 4, premultiplied: true),
+            new PhotoEdits { Brightness = 80 });
+        Check("预乘 alpha 半透明像素：跳过调色（保持 40）",
+              pre.Pixels[2] == 40, pre.Pixels[2].ToString());
+
+        // 不透明像素在预乘模式下**应该**照常调色
+        var preOpaque = EditRenderer.Apply(
+            Bmp(MakeBgra(4, 4, 40, 40, 40, a: 255), 4, 4, premultiplied: true),
+            new PhotoEdits { Brightness = 80 });
+        Check("预乘 alpha 不透明像素：照常调色", preOpaque.Pixels[2] > 40, preOpaque.Pixels[2].ToString());
+
+        // ---- K12: 尺寸预告（不真算像素）与实际结果一致 ----
+        var edits = new PhotoEdits { Rotation = 90, CropX = 0.25, CropY = 0.25, CropW = 0.5, CropH = 0.5 };
+        var actual = EditRenderer.Apply(Bmp(MakeIndexed(8, 4), 8, 4), edits);
+        var (pw, ph) = EditRenderer.ResultSize(8, 4, edits);
+        Check("ResultSize 与实际渲染结果一致",
+              pw == actual.PixelWidth && ph == actual.PixelHeight,
+              $"预告 {pw}×{ph} / 实际 {actual.PixelWidth}×{actual.PixelHeight}");
+
+        // ---- K13: 大图性能（400 万像素，全流程）----
+        var bigSw = Stopwatch.StartNew();
+        EditRenderer.Apply(Bmp(MakeBgra(2000, 2000, 90, 120, 160), 2000, 2000), new PhotoEdits
+        {
+            Rotation = 90,
+            FlipV = true,
+            CropX = 0.1,
+            CropY = 0.1,
+            CropW = 0.8,
+            CropH = 0.8,
+            Brightness = 10,
+            Contrast = 10,
+            Saturation = 10,
+            Temperature = 10,
+        });
+        bigSw.Stop();
+        Check("大图（400 万像素）全流程够快（< 3000ms，Debug 下也算宽裕）",
+              bigSw.ElapsedMilliseconds < 3000, $"{bigSw.ElapsedMilliseconds} ms");
+
+        // ---- K14: 参数序列化 round-trip ----
+        var complex = new PhotoEdits
+        {
+            Rotation = 270,
+            FlipH = true,
+            CropX = 0.125,
+            CropY = 0.25,
+            CropW = 0.5,
+            CropH = 0.375,
+            Brightness = 12.5,
+            Contrast = -8,
+            Saturation = 33,
+            Temperature = -20,
+        };
+        string text = complex.Serialize();
+        var parsed = PhotoEdits.Parse(text);
+        Check("序列化 round-trip：字符串一致", parsed.Serialize() == text, text);
+        Check("序列化 round-trip：各字段都对",
+              parsed.Rotation == 270 && parsed.FlipH && !parsed.FlipV
+              && Math.Abs(parsed.CropX - 0.125) < 1e-6 && Math.Abs(parsed.CropH - 0.375) < 1e-6
+              && Math.Abs(parsed.Brightness - 12.5) < 1e-6
+              && Math.Abs(parsed.Contrast + 8) < 1e-6
+              && Math.Abs(parsed.Saturation - 33) < 1e-6
+              && Math.Abs(parsed.Temperature + 20) < 1e-6);
+
+        Check("序列化：没编辑过是空串（库里存 NULL）", new PhotoEdits().Serialize().Length == 0);
+        Check("序列化：只写非默认项（旋转 90 的串里不该出现亮度）",
+              new PhotoEdits { Rotation = 90 }.Serialize() == "r=90",
+              new PhotoEdits { Rotation = 90 }.Serialize());
+
+        // ---- K15: 脏数据不许炸 ----
+        Check("解析：空串 / null / 乱码都不抛异常",
+              PhotoEdits.Parse(null).IsIdentity
+              && PhotoEdits.Parse("").IsIdentity
+              && PhotoEdits.Parse("????").IsIdentity
+              && PhotoEdits.Parse("r=abc;b=;;=1").IsIdentity);
+        Check("规整：角度 450 → 90", new PhotoEdits { Rotation = 450 }.Normalized().Rotation == 90);
+        Check("规整：角度 -90 → 270", new PhotoEdits { Rotation = -90 }.Normalized().Rotation == 270);
+        var outOfRange = new PhotoEdits { CropX = -1, CropY = 0.9, CropW = 3, CropH = 0.5 }.Normalized();
+        Check("规整：裁剪越界会被夹进图内",
+              Near(outOfRange.CropX, 0) && Near(outOfRange.CropW, 1)
+              && outOfRange.CropY + outOfRange.CropH <= 1.0001,
+              outOfRange.Serialize());
+        Check("规整：调色夹到 ±100",
+              new PhotoEdits { Brightness = 999, Temperature = -999 }.Normalized()
+                  is { Brightness: 100, Temperature: -100 });
+        Check("规整：NaN 当成 0（不然会把整张图算成垃圾）",
+              new PhotoEdits { Contrast = double.NaN }.Normalized().Contrast == 0);
+
+        // ---- K16: 签名（缩略图缓存的 key）----
+        Check("签名：同一组参数两次算出来一样",
+              new PhotoEdits { Rotation = 90, Brightness = 5 }.Signature()
+              == new PhotoEdits { Rotation = 90, Brightness = 5 }.Signature());
+        Check("签名：不同参数指纹不同",
+              new PhotoEdits { Rotation = 90 }.Signature()
+              != new PhotoEdits { Rotation = 180 }.Signature());
+        Check("签名：没编辑过是固定值 0", new PhotoEdits().Signature() == "0");
+        Check("签名：只含文件名安全字符（16 进制）",
+              new PhotoEdits { Rotation = 90, CropX = 0.5 }.Signature().All(
+                  c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')));
+
+        // ---- K17: 像素矩形 → 归一化（界面拖完裁剪框走这条路）----
+        var fromPixels = new PhotoEdits();
+        EditRenderer.SetCropFromPixels(fromPixels, 100, 200, 25, 50, 50, 100);
+        Check("像素矩形转归一化：(25,50,50,100) / 100×200 → 0.25,0.25,0.5,0.5",
+              Math.Abs(fromPixels.CropX - 0.25) < 1e-9 && Math.Abs(fromPixels.CropY - 0.25) < 1e-9
+              && Math.Abs(fromPixels.CropW - 0.5) < 1e-9 && Math.Abs(fromPixels.CropH - 0.5) < 1e-9);
+
+        var clampedCrop = new PhotoEdits();
+        EditRenderer.SetCropFromPixels(clampedCrop, 100, 100, 90, 90, 500, 500);
+        Check("像素矩形越界：夹回图内（10×10 的右下角）",
+              Near(clampedCrop.CropX, 0.9) && Near(clampedCrop.CropY, 0.9)
+              && Near(clampedCrop.CropW, 0.1) && Near(clampedCrop.CropH, 0.1),
+              clampedCrop.Serialize());
+
+        // ---- K18: 摘要文本（界面上"这张图改过什么"）----
+        Check("摘要：没编辑过是空串", new PhotoEdits().Describe().Length == 0);
+        Check("摘要：改过就有内容",
+              new PhotoEdits { Rotation = 90, FlipH = true }.Describe().Contains("旋转")
+              && new PhotoEdits { Rotation = 90, FlipH = true }.Describe().Contains("翻转"),
+              new PhotoEdits { Rotation = 90, FlipH = true }.Describe());
+    }
+
+    /// <summary>
+    /// 编辑参数在索引库里的存取 —— 包括**从 v5 老库升级**这一条。
+    /// 老库升级是最容易出事的地方：用户库里躺着评分 / 收藏 / 标签。
+    /// </summary>
+    private static void EditStore()
+    {
+        Console.WriteLine();
+        Console.WriteLine("==== K. 非编辑参数：索引库存取与升级 ====");
+        Console.WriteLine();
+
+        string db = Path.Combine(Path.GetTempPath(), "cvedit-test.db");
+        foreach (string suffix in new[] { "", "-wal", "-shm" })
+        {
+            try { File.Delete(db + suffix); } catch { }
+        }
+
+        const string Photo = @"C:\fake\a.jpg";
+
+        // ---- K19: 造一个 **v5** 的老库（没有 Edits 列），带用户数据 ----
+        using (var conn = new SqliteConnection($"Data Source={db}"))
+        {
+            conn.Open();
+
+            void Run(string sql)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = sql;
+                cmd.ExecuteNonQuery();
+            }
+
+            // 完整照抄 v5 的建表语句（少了 NOT NULL 的列，插数据会失败）
+            Run(@"
+                CREATE TABLE Media (
+                    Path          TEXT    PRIMARY KEY,
+                    PathLower     TEXT    NOT NULL,
+                    Directory     TEXT    NOT NULL,
+                    FileName      TEXT    NOT NULL,
+                    Kind          INTEGER NOT NULL DEFAULT 0,
+                    FileSize      INTEGER NOT NULL DEFAULT 0,
+                    ModifiedTicks INTEGER NOT NULL DEFAULT 0,
+                    PixelWidth    INTEGER NOT NULL DEFAULT 0,
+                    PixelHeight   INTEGER NOT NULL DEFAULT 0,
+                    DateTaken     INTEGER NULL,
+                    DateEstimated INTEGER NOT NULL DEFAULT 0,
+                    CameraMake    TEXT    NULL,
+                    CameraModel   TEXT    NULL,
+                    LensModel     TEXT    NULL,
+                    FNumber       TEXT    NULL,
+                    ExposureTime  TEXT    NULL,
+                    IsoSpeed      TEXT    NULL,
+                    FocalLength   TEXT    NULL,
+                    Rating        INTEGER NOT NULL DEFAULT 0,
+                    Favorite      INTEGER NOT NULL DEFAULT 0,
+                    Md5           TEXT    NULL,
+                    PHash         TEXT    NULL,
+                    Source        TEXT    NULL,
+                    IndexedAt     INTEGER NOT NULL DEFAULT 0
+                );");
+            Run(@"
+                CREATE TABLE Tags (
+                    Path     TEXT NOT NULL,
+                    Tag      TEXT NOT NULL,
+                    TagLower TEXT NOT NULL,
+                    PRIMARY KEY (Path, TagLower)
+                );");
+            Run($"INSERT INTO Media (Path, PathLower, Directory, FileName, Rating, Favorite, Source) " +
+                $"VALUES ('{Photo}', '{Photo.ToLowerInvariant()}', 'C:\\fake', 'a.jpg', 4, 1, 'wechat');");
+            Run($"INSERT INTO Tags (Path, Tag, TagLower) VALUES ('{Photo}', '旅行', '旅行');");
+            Run("PRAGMA user_version = 5;");
+        }
+
+        using var index = new MediaIndex(db);
+
+        // ---- K20: 升级到 v6 之后，用户数据必须一个都不少 ----
+        Check("v5 → v6：评分还在", index.GetRating(Photo) == 4, index.GetRating(Photo).ToString());
+        Check("v5 → v6：收藏还在", index.IsFavorite(Photo));
+        Check("v5 → v6：标签还在", index.GetTags(Photo).Contains("旅行"));
+
+        // ---- K21: 升级完 Edits 列立即可用，且老记录默认"没编辑过" ----
+        Check("v5 → v6：老图默认没编辑过（Edits = NULL）",
+              index.GetEdits(Photo).IsIdentity && index.CountEdited() == 0);
+
+        var edits = new PhotoEdits { Rotation = 90, Brightness = 15, CropX = 0.1, CropW = 0.8 };
+        index.SetEdits(Photo, edits);
+        Check("写入后读回来一致", index.GetEdits(Photo).Serialize() == edits.Serialize(),
+              index.GetEdits(Photo).Serialize());
+
+        // 写编辑参数不该动到评分 / 收藏
+        Check("写编辑参数不影响评分 / 收藏",
+              index.GetRating(Photo) == 4 && index.IsFavorite(Photo));
+
+        // ---- K22: 清除编辑 ----
+        index.SetEdits(Photo, new PhotoEdits());   // "等于没改"的参数 = 清除
+        Check("写入'空参数'等于清除", index.GetEdits(Photo).IsIdentity && index.CountEdited() == 0);
+
+        index.SetEdits(Photo, edits);
+        index.ClearEdits(Photo);
+        Check("ClearEdits 之后回到没编辑过", index.GetEdits(Photo).IsIdentity && index.CountEdited() == 0);
+
+        // ---- K23: 批量读取（缩略图墙用）----
+        index.SetEdits(Photo, edits);
+        index.SetEdits(@"C:\fake\b.jpg", null);
+        var all = index.LoadAllEdits();
+        Check("批量读取：只返回编辑过的那几条", all.Count == 1 && all.ContainsKey(Photo), all.Count.ToString());
+        Check("批量读取：计数与 CountEdited 一致", index.CountEdited() == all.Count);
+
+        // ---- K24: 库里存的确实是能一眼看懂的文本；顺便确认升级没碰别的列 ----
+        using (var conn = new SqliteConnection($"Data Source={db}"))
+        {
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"SELECT Edits, Source, Rating FROM Media WHERE Path = '{Photo}';";
+
+            using var r = cmd.ExecuteReader();
+            r.Read();
+
+            string raw = r.IsDBNull(0) ? "" : r.GetString(0);
+            Check("库里存的是可读文本（出问题时能直接用 sqlite 看）",
+                  raw.Contains("r=90") && raw.Contains("b=15"), raw);
+            Check("升级后 Source / Rating 列也原封不动",
+                  !r.IsDBNull(1) && r.GetString(1) == "wechat" && r.GetInt32(2) == 4);
+        }
+
+        // ---- K25: 库确实是 v6 ----
+        using (var conn = new SqliteConnection($"Data Source={db}"))
+        {
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "PRAGMA user_version;";
+            int version = Convert.ToInt32(cmd.ExecuteScalar() ?? 0);
+            Check("表结构版本 = 6", version == 6, version.ToString());
+        }
+
+        try { File.Delete(db + "-wal"); } catch { }
+        try { File.Delete(db + "-shm"); } catch { }
+    }
+
     private static async Task<int> Main(string[] args)
     {
         // 诊断模式：让 Magick 逐个试真文件，把"它猜不出格式"的全揪出来。
@@ -148,6 +648,8 @@ internal static class Program
         SocialSource();
         AppIdentity();
         Histogram();
+        EditRender();
+        EditStore();
 
         Console.WriteLine();
         Console.WriteLine(_fail == 0 ? "==== 全部通过 ====" : $"==== 有 {_fail} 项失败 ====");
