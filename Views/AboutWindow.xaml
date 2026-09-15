@@ -115,7 +115,7 @@
                         </Grid>
 
                         <HyperlinkButton Content="GitHub Releases ↗" FontSize="11"
-                                         Padding="0,1" NavigateUri="https://github.com/Celeste-114514/CelesteGallery/releases"/>
+                                         Padding="0,1" NavigateUri="https://github.com/Celeste-114514/CelesteViewer/releases"/>
                     </StackPanel>
                 </Border>
 

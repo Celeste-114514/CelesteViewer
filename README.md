@@ -14,7 +14,7 @@
 
 ## 安装
 
-从 [Releases](https://github.com/Celeste-114514/CelesteGallery/releases) 下载 `CelesteGallery-Setup-<版本>.exe` 运行即可。
+从 [Releases](https://github.com/Celeste-114514/CelesteViewer/releases) 下载 `CelesteGallery-Setup-<版本>.exe` 运行即可。
 
 程序是**框架依赖**发布，运行前需要：
 

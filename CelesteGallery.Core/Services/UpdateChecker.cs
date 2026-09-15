@@ -23,12 +23,17 @@ namespace CelesteGallery.Services;
 public static class UpdateChecker
 {
     /// <summary>GitHub Releases latest 接口。</summary>
+    // 注意：这里用的是 **GitHub 仓库名**，不是应用名。
+    // 应用已经改名成 CelesteGallery，但 GitHub 上的仓库还叫 CelesteViewer，
+    // 所以这两个地址必须跟着仓库走 —— 写成 CelesteGallery 会 404，
+    // 而且是静默失败（界面上只会显示"无新版本"），很难发现。
+    // 哪天把 GitHub 仓库也改名了，这两处要一起改。
     public const string GithubReleasesApi =
-        "https://api.github.com/repos/Celeste-114514/CelesteGallery/releases/latest";
+        "https://api.github.com/repos/Celeste-114514/CelesteViewer/releases/latest";
 
     /// <summary>Release 页面的地址（人工下载用，界面上的「GitHub Releases ↗」）。</summary>
     public const string ReleasesPageUrl =
-        "https://github.com/Celeste-114514/CelesteGallery/releases";
+        "https://github.com/Celeste-114514/CelesteViewer/releases";
 
     /// <summary>最近一次发现的新版本（仅当比当前版本新才非空）。</summary>
     public sealed class UpdateInfo
