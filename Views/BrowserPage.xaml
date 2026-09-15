@@ -787,6 +787,15 @@
                                 <TextBlock Text="取消全选" FontSize="12"/>
                             </StackPanel>
                         </Button>
+                        <Button x:Name="BatchButton"
+                                Click="BatchButton_Click"
+                                Padding="10,4"
+                                ToolTipService.ToolTip="对选中的图做批量处理">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon Glyph="&#xE71C;" FontSize="13"/>
+                                <TextBlock Text="批量处理" FontSize="12"/>
+                            </StackPanel>
+                        </Button>
                         <TextBlock x:Name="SelCountText"
                                    Text="已选 0 张" FontSize="12"
                                    Foreground="#A6FFFFFF"
@@ -801,6 +810,134 @@
                                 <TextBlock Text="退出多选" FontSize="12"/>
                             </StackPanel>
                         </Button>
+                    </StackPanel>
+                </Border>
+
+                <!-- 批量处理面板：从多选命令条「批量处理」按钮打开 -->
+                <Border x:Name="BatchPanel"
+                        Grid.Row="2"
+                        VerticalAlignment="Bottom"
+                        HorizontalAlignment="Center"
+                        Margin="0,0,0,14"
+                        Background="#FF1B1B1B"
+                        BorderBrush="#33FFFFFF"
+                        BorderThickness="1"
+                        CornerRadius="12"
+                        Padding="18,16"
+                        Width="660"
+                        MaxWidth="660"
+                        Visibility="Collapsed">
+                    <StackPanel Spacing="12">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="批量处理" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                            <Button x:Name="BatchCloseButton" Grid.Column="1"
+                                    Width="32" Height="30" Padding="0" Background="Transparent" BorderThickness="0"
+                                    Click="BatchCloseButton_Click" ToolTipService.ToolTip="关闭">
+                                <FontIcon Glyph="&#xE8BB;" FontSize="15"/>
+                            </Button>
+                        </Grid>
+
+                        <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                            <TextBlock Text="操作" FontSize="12" Foreground="#99FFFFFF" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="OpCombo" SelectionChanged="OpCombo_SelectionChanged" Width="160">
+                                <ComboBoxItem Content="旋转 / 翻转" Tag="RotateFlip" IsSelected="True"/>
+                                <ComboBoxItem Content="统一调色" Tag="Tone"/>
+                                <ComboBoxItem Content="改尺寸" Tag="Resize"/>
+                                <ComboBoxItem Content="格式转换" Tag="Convert"/>
+                                <ComboBoxItem Content="批量重命名" Tag="Rename"/>
+                            </ComboBox>
+                        </StackPanel>
+
+                        <!-- 旋转 / 翻转 -->
+                        <StackPanel x:Name="GpRotate" Spacing="8">
+                            <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                                <TextBlock Text="旋转" FontSize="12" Foreground="#99FFFFFF" VerticalAlignment="Center"/>
+                                <ComboBox x:Name="RotCombo" Width="120">
+                                    <ComboBoxItem Content="不旋转" Tag="0" IsSelected="True"/>
+                                    <ComboBoxItem Content="90°" Tag="90"/>
+                                    <ComboBoxItem Content="180°" Tag="180"/>
+                                    <ComboBoxItem Content="270°" Tag="270"/>
+                                </ComboBox>
+                                <ToggleButton x:Name="FlipHToggle" Content="左右翻转"/>
+                                <ToggleButton x:Name="FlipVToggle" Content="上下翻转"/>
+                            </StackPanel>
+                        </StackPanel>
+
+                        <!-- 调色 -->
+                        <StackPanel x:Name="GpTone" Spacing="6" Visibility="Collapsed">
+                            <TextBlock Text="调色（套用到所有选中图）" FontSize="12" Foreground="#99FFFFFF"/>
+                            <StackPanel Orientation="Horizontal" Spacing="14">
+                                <Slider x:Name="ToneBright" Width="150" Minimum="-100" Maximum="100" Header="亮度"/>
+                                <Slider x:Name="ToneContrast" Width="150" Minimum="-100" Maximum="100" Header="对比度"/>
+                                <Slider x:Name="ToneSat" Width="150" Minimum="-100" Maximum="100" Header="饱和度"/>
+                            </StackPanel>
+                        </StackPanel>
+
+                        <!-- 改尺寸 -->
+                        <StackPanel x:Name="GpResize" Spacing="6" Visibility="Collapsed">
+                            <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                                <TextBlock Text="长边缩到" FontSize="12" Foreground="#99FFFFFF" VerticalAlignment="Center"/>
+                                <TextBox x:Name="ResizeBox" Width="90" Text="1920" VerticalAlignment="Center"/>
+                                <TextBlock Text="像素（等比）" FontSize="12" Foreground="#99FFFFFF" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </StackPanel>
+
+                        <!-- 格式转换 -->
+                        <StackPanel x:Name="GpConvert" Spacing="6" Visibility="Collapsed">
+                            <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                                <TextBlock Text="转为" FontSize="12" Foreground="#99FFFFFF" VerticalAlignment="Center"/>
+                                <ComboBox x:Name="FmtCombo" Width="140">
+                                    <ComboBoxItem Content="PNG" Tag=".png" IsSelected="True"/>
+                                    <ComboBoxItem Content="JPEG" Tag=".jpg"/>
+                                    <ComboBoxItem Content="WebP" Tag=".webp"/>
+                                    <ComboBoxItem Content="BMP" Tag=".bmp"/>
+                                    <ComboBoxItem Content="TIFF" Tag=".tiff"/>
+                                </ComboBox>
+                            </StackPanel>
+                        </StackPanel>
+
+                        <!-- 批量重命名 -->
+                        <StackPanel x:Name="GpRename" Spacing="6" Visibility="Collapsed">
+                            <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                                <TextBlock Text="模式" FontSize="12" Foreground="#99FFFFFF" VerticalAlignment="Center"/>
+                                <TextBox x:Name="RenameBox" Width="240" Text="{}{n}_{name}"/>
+                            </StackPanel>
+                            <TextBlock Text="{}可用：{n}=序号　{n:3}=补零序号　{name}=原名　{ext}=原扩展名" FontSize="11" Foreground="#66FFFFFF"/>
+                        </StackPanel>
+
+                        <!-- 输出选项 -->
+                        <Border BorderBrush="#1AFFFFFF" BorderThickness="0,1,0,0" Padding="0,10,0,0">
+                            <StackPanel Spacing="8">
+                                <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                                    <TextBlock Text="文件名加后缀" FontSize="12" Foreground="#99FFFFFF" VerticalAlignment="Center"/>
+                                    <TextBox x:Name="SuffixBox" Width="110" Text="_batch" VerticalAlignment="Center"/>
+                                    <Button x:Name="PickDirButton" Click="PickDirButton_Click" Padding="10,4">
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <FontIcon Glyph="&#xE8B7;" FontSize="13"/>
+                                            <TextBlock Text="选择输出目录" FontSize="12"/>
+                                        </StackPanel>
+                                    </Button>
+                                    <TextBlock x:Name="DirText" FontSize="11" Foreground="#66FFFFFF" VerticalAlignment="Center" Text="（与原图同目录）"/>
+                                </StackPanel>
+                                <CheckBox x:Name="OverwriteCheck" Content="允许覆盖已存在的输出文件"/>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- 运行 + 进度 -->
+                        <StackPanel Spacing="8">
+                            <Button x:Name="RunBatchButton" Click="RunBatchButton_Click" Background="#3A6EA5" Padding="14,6">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <FontIcon Glyph="&#xE768;" FontSize="13"/>
+                                    <TextBlock Text="开始批处理" FontSize="13"/>
+                                </StackPanel>
+                            </Button>
+                            <ProgressBar x:Name="BatchProgress" Visibility="Collapsed" Maximum="1" Value="0"/>
+                            <TextBlock x:Name="BatchStatus" FontSize="12" Foreground="#A6FFFFFF" TextWrapping="Wrap" Text=""/>
+                        </StackPanel>
                     </StackPanel>
                 </Border>
 

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.WindowsRuntime;
 using System.Threading;
 using System.Threading.Tasks;
@@ -19,6 +20,8 @@ using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage;
 using Windows.Storage.Pickers;
 using Windows.Storage.Streams;
+using WinRT;
+using WinRT.Interop;
 
 // Windows.Storage 和 System.IO 都有一个叫 FileAttributes 的枚举，
 // 不加别名会报"不明确的引用"
@@ -2440,6 +2443,196 @@ public sealed partial class BrowserPage : Page
     }
 
     private void ExitMultiButton_Click(object sender, RoutedEventArgs e) => ExitMultiSelect();
+
+    // 非打包程序里调系统选择器必须先把窗口句柄喂进去，否则一闪就关。
+    // 这个 COM 接口的 IID 是固定的，直接按 GUID 声明最稳（不同 WinRT 版本里
+    // 它的 C# 投影类型名字可能不一样，自己声明就不依赖那个名字）。
+    [ComImport]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [Guid("3E68D4BD-7135-4D10-8015-9FBF3936F305")]
+    private interface IInitializeWithWindow
+    {
+        void Initialize(IntPtr hwnd);
+    }
+
+    // ===== 批量处理（路线图第 7 步）=====
+
+    private CancellationTokenSource? _batchCts;
+    private string? _batchOutputDir;
+    private bool _batchRunning;
+
+    private void BatchButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedSet.Count == 0)
+        {
+            BatchStatus.Text = "请先勾选至少一张图。";
+            return;
+        }
+        OpCombo_SelectionChanged(OpCombo, null); // 同步一次分组可见性
+        BatchPanel.Visibility = Visibility.Visible;
+        StartupLog.Write("BrowserPage: 打开批量处理面板");
+    }
+
+    private void BatchCloseButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_batchRunning) return; // 跑着时不让关，避免状态乱
+        BatchPanel.Visibility = Visibility.Collapsed;
+    }
+
+    private void OpCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        // XAML 构造过程中 ComboBox 的选中项一落地就会触发本事件，
+        // 那时排在后面的分组（GpTone 等）还没实例化出来，全是 null，直接访问会炸。
+        // 所以这里先做一次空检查——这不是防御过度，是必须的。
+        if (GpRotate is null || GpTone is null || GpResize is null || GpConvert is null || GpRename is null)
+            return;
+
+        var tag = (OpCombo.SelectedItem as ComboBoxItem)?.Tag?.ToString();
+        GpRotate.Visibility  = tag == "RotateFlip" ? Visibility.Visible : Visibility.Collapsed;
+        GpTone.Visibility    = tag == "Tone"       ? Visibility.Visible : Visibility.Collapsed;
+        GpResize.Visibility  = tag == "Resize"     ? Visibility.Visible : Visibility.Collapsed;
+        GpConvert.Visibility = tag == "Convert"    ? Visibility.Visible : Visibility.Collapsed;
+        GpRename.Visibility  = tag == "Rename"     ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private async void PickDirButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var hwnd = WindowNative.GetWindowHandle(App.Instance!);
+            var picker = new FolderPicker
+            {
+                SuggestedStartLocation = PickerLocationId.PicturesLibrary,
+            };
+            picker.FileTypeFilter.Add("*");
+            picker.As<IInitializeWithWindow>().Initialize(hwnd);
+            var folder = await picker.PickSingleFolderAsync();
+            if (folder is not null)
+            {
+                _batchOutputDir = folder.Path;
+                DirText.Text = folder.Path;
+            }
+        }
+        catch (Exception ex)
+        {
+            BatchStatus.Text = "选择目录失败：" + ex.Message;
+        }
+    }
+
+    private async void RunBatchButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_batchRunning) return;
+        if (_selectedSet.Count == 0) { BatchStatus.Text = "没有选中的图。"; return; }
+
+        var opt = BuildBatchOptions();
+        if (opt is null) return; // 参数有误，已在状态栏提示
+
+        var list = _selectedSet.Select(it => it.Path).ToList();
+        if (list.Count == 0) { BatchStatus.Text = "没有选中的图。"; return; }
+
+        _batchRunning = true;
+        RunBatchButton.IsEnabled = false;
+        BatchProgress.Visibility = Visibility.Visible;
+        BatchProgress.Value = 0;
+        BatchStatus.Text = $"正在处理 0 / {list.Count} …";
+
+        _batchCts = new CancellationTokenSource();
+        var progress = new Progress<BatchProgress>(p =>
+        {
+            BatchProgress.Value = list.Count == 0 ? 0 : (double)p.Done / list.Count;
+            BatchStatus.Text = p.LastWasError
+                ? $"第 {p.Done}/{p.Total} 张：{p.CurrentFile} 失败（{p.LastError}）"
+                : $"正在处理 {p.Done} / {p.Total} …";
+        });
+
+        try
+        {
+            BatchResult result = await BatchEditService.RunAsync(list, opt, progress, _batchCts.Token);
+            BatchStatus.Text = $"完成：成功 {result.Succeeded} 张，失败 {result.Failed} 张。"
+                + (result.Failed > 0 ? " 失败的见日志。" : "");
+            StartupLog.Write($"批量处理完成：成功 {result.Succeeded} / 失败 {result.Failed}（共 {result.Total}）");
+        }
+        catch (OperationCanceledException)
+        {
+            BatchStatus.Text = "已取消。";
+        }
+        catch (Exception ex)
+        {
+            BatchStatus.Text = "批处理出错：" + ex.Message;
+        }
+        finally
+        {
+            _batchRunning = false;
+            RunBatchButton.IsEnabled = true;
+            if (list.Count > 0) BatchProgress.Value = 1;
+            // 重新扫描当前目录：新生成的批量文件要出现在墙上，被重命名的原图也要消失
+            if (_currentFolder is not null)
+            {
+                try { await LoadFolderAsync(_currentFolder); } catch { }
+            }
+        }
+    }
+
+    private BatchOptions? BuildBatchOptions()
+    {
+        var op = (OpCombo.SelectedItem as ComboBoxItem)?.Tag?.ToString();
+        var opt = new BatchOptions
+        {
+            OutputDirectory = _batchOutputDir,
+            Suffix = SuffixBox.Text,
+            Overwrite = OverwriteCheck.IsChecked == true,
+        };
+
+        switch (op)
+        {
+            case "RotateFlip":
+                opt.Operation = BatchOperation.RotateFlip;
+                opt.Rotation = int.Parse((RotCombo.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "0");
+                opt.FlipH = FlipHToggle.IsChecked == true;
+                opt.FlipV = FlipVToggle.IsChecked == true;
+                break;
+            case "Tone":
+                opt.Operation = BatchOperation.Tone;
+                var look = new LookSettings();
+                look.Brightness = (int)ToneBright.Value;
+                look.Contrast = (int)ToneContrast.Value;
+                look.Saturation = (int)ToneSat.Value;
+                opt.Look = look;
+                break;
+            case "Resize":
+                opt.Operation = BatchOperation.Resize;
+                if (!int.TryParse(ResizeBox.Text, out int le) || le <= 0)
+                {
+                    BatchStatus.Text = "长边需为正整数。"; return null;
+                }
+                opt.LongEdge = le;
+                break;
+            case "Convert":
+                opt.Operation = BatchOperation.Convert;
+                opt.TargetExtension = (FmtCombo.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? ".png";
+                break;
+            case "Rename":
+                opt.Operation = BatchOperation.Rename;
+                opt.RenamePattern = string.IsNullOrWhiteSpace(RenameBox.Text) ? "{n}_{name}" : RenameBox.Text;
+                break;
+            default:
+                BatchStatus.Text = "请选择操作。"; return null;
+        }
+
+        // 既不改后缀也不换目录 = 输出会覆盖原图，除非明确允许
+        if (opt.Operation != BatchOperation.Rename
+            && string.IsNullOrWhiteSpace(opt.Suffix)
+            && _batchOutputDir is null
+            && !opt.Overwrite)
+        {
+            BatchStatus.Text = "请填写后缀或选择输出目录，否则会覆盖原图。";
+            return null;
+        }
+
+        return opt;
+    }
+
+
 
     private void UpdateSelCount()
     {
