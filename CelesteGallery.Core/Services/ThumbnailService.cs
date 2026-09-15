@@ -24,6 +24,14 @@ namespace CelesteGallery.Services;
 ///      没有去重的话就会重复解码同一张，白白浪费几倍 CPU。
 ///      这里让第二个请求直接复用第一个的那次解码，不重复开工。
 ///
+///   4. **编辑变体**（<see cref="GetAsync(string,int,PhotoEdits,CancellationToken)"/>）
+///      第 6 步的"非破坏性编辑"落地之后，同一个文件可能有好几种样子 ——
+///      转过 90° 的和没转的、调过色的和没调的。做法是**先取原图缩略图、
+///      再按参数算出编辑后的那份**，两者各占一个缓存 key。
+///      好处是同一张图转十次也只需解码一次，后面九次都是纯 CPU 的小图变换。
+///      ⚠️ 编辑后的那份**绝不写磁盘缓存** —— 参数是随用户操作变的，
+///      写下去就会在"还原"之后继续拿出一张旧的编辑图。
+///
 /// 还有一个 <see cref="DiskThumbnailCache"/> 可选的第四层（磁盘缓存）：
 /// 内存里没有、但上次运行留下过，就直接读文件，跳过解码。
 /// 这是"关掉程序再打开同一目录，缩略图秒出"的来源。
@@ -82,6 +90,106 @@ public sealed class ThumbnailService
             maxConcurrency = Math.Clamp(Environment.ProcessorCount / 2, 2, 8);
         }
         _gate = new SemaphoreSlim(maxConcurrency, maxConcurrency);
+    }
+
+    /// <summary>
+    /// 取一张**按编辑参数渲染过**的缩略图（路线图第 6 步）。
+    ///
+    /// <paramref name="edits"/> 为空或"等于没改"时，行为与不带参数的版本**完全一致** ——
+    /// 也就是说图库里那绝大多数没编辑过的图，走这条路一点额外代价都没有
+    /// （只多一次 bool 判断）。有编辑时才多出"把参数应用到 320px 小图"这一步，
+    /// 那是纯 CPU 的小数组变换，比重新解码一次便宜得多。
+    ///
+    /// 实现上是**两段查缓存**：
+    ///   · 第一段按 <c>路径|尺寸</c> 取原图缩略图 —— 就是原来那套（含磁盘缓存）；
+    ///   · 第二段按 <c>路径|尺寸|参数指纹</c> 取编辑后的那份。
+    /// 所以同一张图不论转几次、调几档色，原图都只解一次，缺的只是各自的变换结果。
+    ///
+    /// 参数指纹用 <see cref="PhotoEdits.Signature"/>，它基于规范化之后的序列化文本 ——
+    /// "转 450°" 和 "转 90°" 会算出同一个指纹，不会在缓存里存两份一模一样的图。
+    /// </summary>
+    public async Task<DecodedBitmap?> GetAsync(
+        string path, int size, PhotoEdits? edits, CancellationToken ct = default)
+    {
+        // 没编辑（常态）→ 走原来那条路，一行多余的工作都不做
+        if (edits is null) return await GetAsync(path, size, ct).ConfigureAwait(false);
+
+        PhotoEdits e = edits.Normalized();
+        if (e.IsIdentity) return await GetAsync(path, size, ct).ConfigureAwait(false);
+
+        string key = EditKeyOf(path, size, e);
+
+        lock (_sync)
+        {
+            if (_cache.TryGetValue(key, out var hit))
+            {
+                _lru.Remove(hit.Node);
+                _lru.AddFirst(hit.Node);
+                return hit.Bitmap;
+            }
+        }
+
+        Task<DecodedBitmap?> pending;
+        lock (_sync)
+        {
+            if (!_inFlight.TryGetValue(key, out pending!))
+            {
+                pending = RenderEditedAsync(path, size, e, key);
+                _inFlight[key] = pending;
+            }
+        }
+
+        try
+        {
+            return await pending.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 编辑变体的真正产出：先要原图缩略图，再在小图上应用参数。
+    ///
+    /// 注意这里**不写磁盘缓存**：编辑参数是用户随时可以改、可以撤的，
+    /// 把带参数的图写进磁盘缓存，"还原"之后照样会读出一张转过角的旧图，
+    /// 而且磁盘缓存的 key 只认"路径 + 尺寸"，它分不清哪份是哪份。
+    /// 原图那份照旧写盘，所以下次启动依然是一次磁盘读 + 一次小图变换，很快。
+    /// </summary>
+    private async Task<DecodedBitmap?> RenderEditedAsync(
+        string path, int size, PhotoEdits edits, string key)
+    {
+        try
+        {
+            // 原图这条走完整流水线（内存 → 磁盘 → 解码），命中率高，通常不碰解码器
+            DecodedBitmap? raw = await GetAsync(path, size, CancellationToken.None)
+                                       .ConfigureAwait(false);
+            if (raw is null) return null;
+
+            // 变换是纯 CPU 的活，和上面那段一样显式扔线程池：
+            // await 在闸门空着时会同步完成，落到 UI 线程上就是一次几十毫秒的卡顿
+            DecodedBitmap edited = await Task.Run(() => EditRenderer.Apply(raw, edits))
+                                         .ConfigureAwait(false);
+
+            Store(key, edited);
+            return edited;
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            lock (_sync)
+            {
+                _inFlight.Remove(key);
+            }
+        }
     }
 
     /// <summary>磁盘缓存实例（没启用就是 null）。</summary>
@@ -307,4 +415,14 @@ public sealed class ThumbnailService
     }
 
     private static string KeyOf(string path, int size) => path + "|" + size.ToString();
+
+    /// <summary>
+    /// 编辑变体的缓存 key：<c>路径|尺寸|e指纹</c>。
+    ///
+    /// 前面特意保留 <c>路径|</c> 这一段，是为了让 <see cref="Invalidate(string)"/>
+    /// 那句"按前缀匹配"能顺手把编辑变体一起清掉 ——
+    /// 图被改过之后原图那份和所有变体都过期了，只清一半会留下幽灵缩略图。
+    /// </summary>
+    private static string EditKeyOf(string path, int size, PhotoEdits edits)
+        => KeyOf(path, size) + "|e" + edits.Signature();
 }

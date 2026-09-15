@@ -348,6 +348,28 @@ public sealed class PhotoEdits
         }
     }
 
+    /// <summary>
+    /// 拷一份独立的参数出来。
+    ///
+    /// 为什么必须有它：<see cref="LibraryIndexService"/> 现在把全库的编辑参数
+    /// 缓存在一个内存映射里（缩略图墙每一格都要读，不能一格查一次库）。
+    /// 但查看器拿到参数后是**就地改**的（转一下改 Rotation、拖滑块改 Look），
+    /// 直接把映射里那个对象交出去 = 一改就把缓存里的"存档值"也改了，
+    /// 于是"还原"还原不回真值、墙上显示的和库里的对不上。
+    /// 所以对外一律给副本，映射里的那份只有 <c>SetEdits</c> 能改。
+    /// </summary>
+    public PhotoEdits Clone() => new()
+    {
+        Rotation = Rotation,
+        FlipH = FlipH,
+        FlipV = FlipV,
+        CropX = CropX,
+        CropY = CropY,
+        CropW = CropW,
+        CropH = CropH,
+        Look = Look,
+    };
+
     /// <summary>把另一份参数原样抄过来（界面上的"还原"用得上）。</summary>
     public void CopyFrom(PhotoEdits other)
     {

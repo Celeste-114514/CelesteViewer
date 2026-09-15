@@ -236,14 +236,47 @@ public sealed class LibraryIndexService
     //
     // 和评分 / 收藏 / 标签同类：都是**用户的操作**，重扫磁盘不该丢。
     // 索引不可用时返回"没编辑过"（空参数），宁可暂时显示原图，也不能崩。
+    //
+    // 为什么不每次直接查库：缩略图墙每一格都要知道"这张改过没有、改成什么样"。
+    // 一屏几十格、来回滚动就是成百上千次单行查询，而库那边所有操作共用一把锁 ——
+    // 后台正在索引时，墙的每一次查询都要和它排队，表现就是滚动发涩。
+    // 所以这里放一份**只装编辑过的图**的内存映射（正常情况是零条或几条），
+    // 一次批量读进来之后全是 O(1) 的字典查找，不碰库也不抢锁。
+
+    /// <summary>路径 → 编辑参数。只装"确实编辑过"的（<c>IsIdentity</c> 的不进来）。</summary>
+    private Dictionary<string, PhotoEdits>? _editsMap;
+
+    private readonly object _editsSync = new();
+
+    /// <summary>
+    /// 某张图的编辑参数变了（存了新的，或者被清除）。
+    ///
+    /// 为什么需要这个事件：看图是**另一个窗口**（PhotoWindow），
+    /// 用户在那边转了个方向，主窗口的缩略图墙完全不知情，
+    /// 于是墙上还是老样子 —— 用户会以为"编辑没生效"。
+    /// 有了它，缩略图墙就能当场把那一格换掉。
+    ///
+    /// 参数是图片路径。触发点在 UI 线程（编辑操作都从界面发起），
+    /// 但订阅方仍应假设自己不在 UI 线程上，自己排一次队再碰控件。
+    /// </summary>
+    public static event Action<string>? EditsChanged;
 
     /// <summary>
     /// 读一张图的非破坏性编辑参数。没编辑过（或读不到）返回空参数 ——
     /// 空参数的 <c>IsIdentity</c> 为真，渲染时会直接跳过整条流水线。
+    ///
+    /// 返回的是**副本**：调用方（查看器）拿到手就会就地改，
+    /// 交出映射里那个对象的话，"改一下"会把缓存里的存档值一起改掉。
     /// </summary>
     public PhotoEdits EditsOf(string path)
     {
-        try { return Index?.GetEdits(path) ?? new PhotoEdits(); }
+        if (string.IsNullOrEmpty(path)) return new PhotoEdits();
+
+        try
+        {
+            var map = EditsMap();
+            return map.TryGetValue(path, out var e) ? e.Clone() : new PhotoEdits();
+        }
         catch (Exception ex)
         {
             StartupLog.Write("LibraryIndexService: 读编辑参数失败", ex);
@@ -254,25 +287,113 @@ public sealed class LibraryIndexService
     /// <summary>
     /// 写编辑参数。传"等于没改"的参数（或 null）等于**清除**，库里那一列变 NULL。
     /// 存之前会过一遍 <see cref="PhotoEdits.Normalized"/> —— 保证库里永远是合法形态。
+    ///
+    /// 写完顺手把内存映射对齐并发出 <see cref="EditsChanged"/>，
+    /// 这样缩略图墙不用自己去轮询"用户刚才改了什么"。
     /// </summary>
     public void SetEdits(string path, PhotoEdits? edits)
     {
-        try { Index?.SetEdits(path, edits); }
-        catch (Exception ex) { StartupLog.Write("LibraryIndexService: 写编辑参数失败", ex); }
+        if (string.IsNullOrEmpty(path)) return;
+
+        try
+        {
+            PhotoEdits? normalized = edits?.Normalized();
+            if (normalized is null || normalized.IsIdentity) normalized = null;
+
+            Index?.SetEdits(path, normalized);
+
+            lock (_editsSync)
+            {
+                // 已经加载过才维护 —— 没加载的话下次 EditsMap() 会从库里读到最新值，
+                // 没必要为了"写一次"先把整张表拉一遍
+                if (_editsMap is not null)
+                {
+                    if (normalized is null) _editsMap.Remove(path);
+                    else _editsMap[path] = normalized;
+                }
+            }
+
+            EditsChanged?.Invoke(path);
+        }
+        catch (Exception ex)
+        {
+            StartupLog.Write("LibraryIndexService: 写编辑参数失败", ex);
+        }
     }
 
     /// <summary>这张图有没有编辑过（列表上打"已编辑"角标用）。</summary>
     public bool HasEdits(string path)
     {
-        try { return !(Index?.GetEdits(path) ?? new PhotoEdits()).IsIdentity; }
+        try { return !string.IsNullOrEmpty(path) && EditsMap().ContainsKey(path); }
         catch { return false; }
     }
 
     /// <summary>整个库里有几张图编辑过。</summary>
     public int CountEdited()
     {
-        try { return Index?.CountEdited() ?? 0; }
+        try { lock (_editsSync) return EditsMap().Count; }
         catch (Exception ex) { StartupLog.Write("LibraryIndexService: 统计编辑失败", ex); return 0; }
+    }
+
+    /// <summary>
+    /// 提前把编辑参数读进内存。
+    ///
+    /// 铺第一屏缩略图时几十个格子会**同时**问"这张改过没有"，
+    /// 第一次问会触发一次全表扫描。让它落在后台线程上，
+    /// 而不是卡在铺图的那一下（用户感知就是"进目录要顿一瞬"）。
+    /// 失败无所谓 —— 真用到时 EditsMap 会自己再试一次。
+    /// </summary>
+    public void WarmEditsCache()
+    {
+        _ = Task.Run(() =>
+        {
+            try { lock (_editsSync) EditsMap(); }
+            catch (Exception ex) { StartupLog.Write("LibraryIndexService: 预热编辑参数失败", ex); }
+        });
+    }
+
+    /// <summary>
+    /// 懒加载那个映射。只在第一次查一次库。
+    ///
+    /// 库里的值进来还要 <see cref="PhotoEdits.Parse"/> 一遍：存的是文本、外面要的是对象。
+    /// 顺手把解析出来等于"没改"的条目剔掉 —— 手工改过的库、旧版本写下的空壳，
+    /// 都不该让墙上多出一个角标。
+    /// </summary>
+    private Dictionary<string, PhotoEdits> EditsMap()
+    {
+        lock (_editsSync)
+        {
+            if (_editsMap is not null) return _editsMap;
+
+            var map = new Dictionary<string, PhotoEdits>(StringComparer.OrdinalIgnoreCase);
+
+            try
+            {
+                var raw = Index?.LoadAllEdits();
+                if (raw is not null)
+                {
+                    foreach (var kv in raw)
+                    {
+                        if (string.IsNullOrEmpty(kv.Key)) continue;
+
+                        PhotoEdits parsed = PhotoEdits.Parse(kv.Value);
+                        if (parsed.IsIdentity) continue;
+
+                        map[kv.Key] = parsed;
+                    }
+                }
+
+                StartupLog.Write($"索引：读入 {map.Count} 张已编辑图片的参数");
+            }
+            catch (Exception ex)
+            {
+                // 读不到就当"都没有编辑过"：墙上显示原图，比弹个错误强
+                StartupLog.Write("LibraryIndexService: 批量读编辑参数失败", ex);
+            }
+
+            _editsMap = map;
+            return map;
+        }
     }
 
     // ===== 重复 / 相似 =====

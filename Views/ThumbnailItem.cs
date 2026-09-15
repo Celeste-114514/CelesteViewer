@@ -119,6 +119,33 @@ public sealed class ThumbnailItem : INotifyPropertyChanged
         _keep ? Visibility.Visible : Visibility.Collapsed;
 
     /// <summary>
+    /// 这张图有没有**非破坏性编辑**（第 6 步：旋转 / 翻转 / 裁剪 / 调色）。
+    ///
+    /// 只表示"改过"，具体改了什么在 <see cref="EditSummary"/> 里。
+    /// 和 <see cref="Thumbnail"/> 是两件独立的事：缩略图可能是编辑后重新渲染的，
+    /// 也可能是还没来得及重渲染的旧图 —— 角标必须无论哪种情况都如实显示，
+    /// 不然用户会以为"我明明转过，怎么没标"。
+    /// </summary>
+    private bool _edited;
+    public bool Edited
+    {
+        get => _edited;
+        set
+        {
+            if (_edited == value) return;
+            _edited = value;
+            Raise(nameof(EditBadgeVisibility));
+        }
+    }
+
+    /// <summary>这张图改过什么（"旋转 90° · 亮度 +20"这种），给日志和将来的提示用。</summary>
+    public string EditSummary { get; set; } = "";
+
+    /// <summary>"已编辑"角标：改过就出现，右下角、压在文件名条上方。</summary>
+    public Visibility EditBadgeVisibility =>
+        _edited ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>
     /// 蓝色选中框的不透明度。普通单选或都选进多选集合都显示，
     /// 用不透明度切换省掉给每个格子分配画刷。
     /// </summary>

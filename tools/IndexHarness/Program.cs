@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using CelesteGallery.Services;
 using ImageMagick;
@@ -603,6 +604,33 @@ internal static class Program
             Check("真字节链路：编码出来的尺寸 = 渲染结果的尺寸（导出的图不会被转回去）",
                   outW == 6 && outH == 8, $"{outW}×{outH}");
         }
+
+        // ---- K20: 参数副本（LibraryIndexService 的内存映射靠它保平安）----
+        //
+        // 编辑参数现在缓存在 LibraryIndexService 的一个内存映射里
+        // （缩略图墙每一格都要问"这张改过没有"，不能一格查一次库）。
+        // 查看器拿到参数后是**就地改**的，所以对外必须给副本 ——
+        // 给的是映射里那个对象的话，"转一下"会把缓存里的存档值一起改掉，
+        // 于是墙上显示的和库里的对不上、还原也还原不回真值。
+        var keepEdits = new PhotoEdits { Rotation = 90, FlipH = true, Look = Tone(brightness: 15) };
+        PhotoEdits copy = keepEdits.Clone();
+
+        Check("副本：内容与签名都一致",
+              copy.Serialize() == keepEdits.Serialize()
+              && copy.Signature() == keepEdits.Signature());
+
+        copy.Rotation = 180;
+        copy.FlipH = false;
+        var copyLook = copy.Look;
+        copyLook.Brightness = -99;
+        copy.Look = copyLook;
+
+        Check("副本：改副本不影响原对象（旋转 / 翻转 / 调色三样都不串）",
+              keepEdits.Rotation == 90 && keepEdits.FlipH && keepEdits.Look.Brightness == 15,
+              $"原对象现在 r={keepEdits.Rotation} fh={keepEdits.FlipH} brt={keepEdits.Look.Brightness}");
+
+        Check("副本：改完之后签名也分开了",
+              copy.Signature() != keepEdits.Signature());
     }
 
     /// <summary>
@@ -748,6 +776,152 @@ internal static class Program
         try { File.Delete(db + "-shm"); } catch { }
     }
 
+    // ==================== M. 缩略图墙按编辑参数出图 ====================
+    //
+    // 第 6 步的收尾：编辑过的图，缩略图墙上也要出**编辑后的样子**，
+    // 而不是原样。这条链路是 ThumbnailService 的"编辑变体"分支：
+    //   先按 路径|尺寸 取原图缩略图（含磁盘缓存）→ 再按参数算出编辑后那份，
+    //   编辑后那份单独占一个 路径|尺寸|参数指纹 的缓存 key。
+    //
+    // 最怕的两件事，这里各有用例盯着：
+    //   1. 编辑变体把**原图那份缓存**污染了 —— 一改就再也回不到原样；
+    //   2. 算了半天其实每次都在重算（缓存 key 没生效）—— 滚动就卡。
+
+    /// <summary>
+    /// 假解码器：不管要什么尺寸，都吐出同一张 12×8 的"编号图"，
+    /// 并且记下自己被调用了几次 —— "有没有真的省掉一次解码"全靠这个计数。
+    /// </summary>
+    private sealed class FakeDecoder : IImageDecoder
+    {
+        private readonly DecodedBitmap _bitmap;
+
+        public FakeDecoder(DecodedBitmap bitmap) => _bitmap = bitmap;
+
+        /// <summary>解码次数。ThumbnailService 声称"换参数不必重新解码"，就靠它验证。</summary>
+        public int Calls { get; private set; }
+
+        public string Name => "测试解码器";
+
+        public bool CanDecode(string extension) => true;
+
+        public Task<PhotoInfo?> ProbeAsync(
+            string path, bool includeMetadata = false, CancellationToken ct = default)
+            => Task.FromResult<PhotoInfo?>(null);
+
+        public Task<DecodedBitmap?> DecodeAsync(
+            string path, int maxWidth, int maxHeight, CancellationToken ct = default)
+        {
+            lock (this) Calls++;
+            return Task.FromResult<DecodedBitmap?>(_bitmap);
+        }
+    }
+
+    private static async Task ThumbnailEditsAsync()
+    {
+        Console.WriteLine();
+        Console.WriteLine("==== M. 缩略图墙按编辑参数出图 ====");
+        Console.WriteLine();
+
+        const string P = @"C:\fake\wall.jpg";
+
+        // 故意**不给磁盘缓存**：这里要验的是内存这套逻辑，
+        // 掺进磁盘缓存会让"解码次数"的判据变得不可控
+        var decoder = new FakeDecoder(Bmp(MakeIndexed(12, 8), 12, 8));
+        var thumbs = new ThumbnailService(decoder, maxConcurrency: 2, maxBytes: 64L * 1024 * 1024);
+
+        // ---- M1: 老接口原样保留（没编辑的图一点额外代价都没有）----
+        var plain = await thumbs.GetAsync(P, 320, CancellationToken.None);
+        var plainAgain = await thumbs.GetAsync(P, 320, (PhotoEdits?)null, CancellationToken.None);
+        Check("M1 传空参数 == 老接口（命中同一份缓存）",
+              plain is not null && ReferenceEquals(plain, plainAgain));
+        Check("M1 解码只跑了一次", decoder.Calls == 1, decoder.Calls.ToString());
+
+        // ---- M2: "空参数"（等于没改）也走原图那条路，不产生多余变体 ----
+        var identity = await thumbs.GetAsync(P, 320, new PhotoEdits(), CancellationToken.None);
+        Check("M2 空参数（IsIdentity）也走原图那条路",
+              ReferenceEquals(plain, identity));
+
+        // ---- M3: 真的编辑 —— 旋转 90°，宽高互换 ----
+        var rotated = await thumbs.GetAsync(P, 320, new PhotoEdits { Rotation = 90 }, CancellationToken.None);
+        Check("M3 旋转 90°：缩略图宽高互换（12×8 → 8×12）",
+              rotated is not null && rotated.PixelWidth == 8 && rotated.PixelHeight == 12,
+              rotated is null ? "null" : $"{rotated.PixelWidth}×{rotated.PixelHeight}");
+
+        // 像素落点也要对：顺时针 90° 之后，新图的左上角来自原图的**左下角**。
+        // 编号图里 R 分量 = y*w + x + 1，原 (0,7) → 7*12+0+1 = 85。
+        Check("M3 旋转的像素落点也对（新左上角 = 原左下角）",
+              rotated is not null && RAt(rotated, 0, 0) == 85,
+              rotated is null ? "null" : RAt(rotated, 0, 0).ToString());
+
+        // ---- M4: 编辑变体缓存生效 —— 同一份参数第二次不再算 ----
+        int callsBefore = decoder.Calls;
+        var sameAgain = await thumbs.GetAsync(P, 320, new PhotoEdits { Rotation = 90 }, CancellationToken.None);
+        Check("M4 同一份参数第二次：命中变体缓存（同一个对象）",
+              ReferenceEquals(rotated, sameAgain));
+        Check("M4 换参数重取**没有**重新解码原图",
+              decoder.Calls == callsBefore, $"{callsBefore} → {decoder.Calls}");
+
+        // ---- M5: 不同参数各自一份，互不覆盖 ----
+        var r180 = await thumbs.GetAsync(P, 320, new PhotoEdits { Rotation = 180 }, CancellationToken.None);
+        Check("M5 转 180° 和转 90° 是两份不同的缓存",
+              r180 is not null && !ReferenceEquals(rotated, r180)
+              && r180.PixelWidth == 12 && r180.PixelHeight == 8,
+              r180 is null ? "null" : $"{r180.PixelWidth}×{r180.PixelHeight}");
+
+        // ---- M6: 只调色（不改几何）也要出编辑后的样子 ----
+        var toned = await thumbs.GetAsync(
+            P, 320, new PhotoEdits { Look = Tone(brightness: 60) }, CancellationToken.None);
+        Check("M6 只调色：尺寸不变（12×8）",
+              toned is not null && toned.PixelWidth == 12 && toned.PixelHeight == 8);
+        Check("M6 只调色：像素确实变亮了",
+              toned is not null && plain is not null && RAt(toned, 0, 4) > RAt(plain, 0, 4),
+              toned is null || plain is null ? "" : $"{RAt(plain, 0, 4)} → {RAt(toned, 0, 4)}");
+
+        // ---- M7: Invalidate（用户在查看器里改了图，墙收到通知后调它）----
+        thumbs.Invalidate(P);
+        var reRotated = await thumbs.GetAsync(P, 320, new PhotoEdits { Rotation = 90 }, CancellationToken.None);
+        Check("M7 Invalidate 把编辑变体一起清掉（拿到的是新算的对象）",
+              reRotated is not null && !ReferenceEquals(rotated, reRotated));
+        Check("M7 重算出来的内容和之前一致",
+              reRotated is not null && rotated is not null
+              && reRotated.PixelWidth == rotated.PixelWidth
+              && reRotated.PixelHeight == rotated.PixelHeight
+              && reRotated.Pixels.SequenceEqual(rotated.Pixels),
+              reRotated is null || rotated is null ? "" : $"{reRotated.PixelWidth}×{reRotated.PixelHeight}");
+
+        // ---- M8: 非破坏性 —— 折腾一圈之后原图那份还是原样 ----
+        //
+        // 这条是整段里最关键的一条。假解码器每次吐的是**同一个对象**，
+        // 所以只要 EditRenderer 在哪一步就地改了它，这里立刻就露馅。
+        var rawAfter = await thumbs.GetAsync(P, 320, CancellationToken.None);
+        Check("M8 折腾一圈之后原图缩略图一个字节都没变",
+              rawAfter is not null && rawAfter.Pixels.SequenceEqual(MakeIndexed(12, 8)));
+
+        // ---- M9: 还原（参数清空）之后墙上必须是原图 ----
+        var back = await thumbs.GetAsync(P, 320, new PhotoEdits(), CancellationToken.None);
+        Check("M9 还原之后拿到的是原图，不是最后那个编辑变体",
+              back is not null && back.PixelWidth == 12 && back.PixelHeight == 8
+              && back.Pixels.SequenceEqual(MakeIndexed(12, 8)),
+              back is null ? "null" : $"{back.PixelWidth}×{back.PixelHeight}");
+
+        // ---- M10: 指纹口径 —— 转 450° 就是转 90°，不该白存两份 ----
+        var r450 = await thumbs.GetAsync(P, 320, new PhotoEdits { Rotation = 450 }, CancellationToken.None);
+        Check("M10 转 450° 与转 90° 归一到同一份缓存",
+              ReferenceEquals(reRotated, r450));
+
+        // ---- M11: 全透明 / 半透明图走调色也不能崩（墙上有 PNG 图标这类图）----
+        var alphaDecoder = new FakeDecoder(Bmp(MakeBgra(8, 8, 120, 120, 120, 128), 8, 8, premultiplied: true));
+        var alphaThumbs = new ThumbnailService(alphaDecoder, maxConcurrency: 2);
+        var alphaToned = await alphaThumbs.GetAsync(
+            @"C:\fake\alpha.png", 320,
+            new PhotoEdits { Look = Tone(brightness: 40) }, CancellationToken.None);
+        Check("M11 半透明图（预乘）调色不报错且尺寸正常",
+              alphaToned is not null && alphaToned.PixelWidth == 8 && alphaToned.PixelHeight == 8);
+        Check("M11 半透明图调色之后 alpha 保持不变",
+              alphaToned is not null && alphaToned.Pixels[3] == 128 && alphaToned.Pixels[7] == 128,
+              alphaToned is null ? "null" : $"{alphaToned.Pixels[3]} / {alphaToned.Pixels[7]}");
+    }
+
     private static async Task<int> Main(string[] args)
     {
         // 诊断模式：让 Magick 逐个试真文件，把"它猜不出格式"的全揪出来。
@@ -775,6 +949,7 @@ internal static class Program
         Histogram();
         EditRender();
         EditStore();
+        await ThumbnailEditsAsync();
 
         Console.WriteLine();
         Console.WriteLine(_fail == 0 ? "==== 全部通过 ====" : $"==== 有 {_fail} 项失败 ====");

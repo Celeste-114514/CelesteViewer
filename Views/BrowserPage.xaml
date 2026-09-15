@@ -113,6 +113,32 @@
                     </StackPanel>
                 </Border>
 
+                <!--
+                  "已编辑"角标：这张图做过非破坏性编辑（第 6 步）。
+                  放在右下角、压在文件名条上方 —— 右上角被多选勾占了，
+                  左上角是子目录标记、左下角是"保留"，四个角各归各家不打架。
+
+                  为什么必须有它：非破坏性编辑不改原文件，用户退回图墙后
+                  光看图其实分不出"这张我调过色"还是"这张本来就这样"，
+                  尤其调得轻的时候。有个角标，将来想批量还原/批量导出时
+                  也一眼知道哪些是要处理的。
+                -->
+                <Border HorizontalAlignment="Right"
+                        VerticalAlignment="Bottom"
+                        Margin="0,0,0,24"
+                        Background="#CC2A6FB0"
+                        CornerRadius="0,6,0,6"
+                        Padding="6,2"
+                        IsHitTestVisible="False"
+                        Visibility="{x:Bind EditBadgeVisibility, Mode=OneWay}">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon Glyph="&#xE70F;" FontSize="10" Foreground="White"
+                                  HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        <TextBlock Text="已编辑" FontSize="10" Foreground="White"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Border>
+
                 <!-- 选中框：用不透明度切换，不给每个格子分配画刷 -->
                 <Border BorderBrush="#FF4DA3FF"
                         BorderThickness="2"

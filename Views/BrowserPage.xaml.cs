@@ -182,6 +182,12 @@ public sealed partial class BrowserPage : Page
         Loaded += OnLoaded;
         KeyDown += OnKeyDown;
 
+        // 订阅"编辑参数变了"。看图窗口在那边改了图，靠这条线通知回来刷新格子。
+        // 事件是静态的，所以必须成对地挂钩 / 摘钩（见 Unloaded）——
+        // 只挂不摘的话，页面被回收之后事件还攥着它，那一格就永远刷不掉了。
+        HookEditsChanged();
+        Unloaded += (_, _) => UnhookEditsChanged();
+
         Root.AllowDrop = true;
         Root.DragOver += Root_DragOver;
         Root.Drop += Root_Drop;
@@ -240,6 +246,14 @@ public sealed partial class BrowserPage : Page
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         StartupLog.Write("BrowserPage: OnLoaded");
+
+        // 页面被卸载过一次又装回来时（换主题、被移出可视树再放回）要把订阅补上。
+        // 带自锁，重复调用不会挂两遍 —— 挂两遍会让一次编辑刷两次格子。
+        HookEditsChanged();
+
+        // 后台先把"哪些图编辑过"读进内存。缩略图墙每一格都要问它一次，
+        // 不能等到第一屏几十个格子一起问的时候才现查库。
+        LibraryIndexService.Shared.WarmEditsCache();
 
         App.Instance?.SetCustomTitleBar(TitleBar);
         BuildTree();
@@ -2140,7 +2154,29 @@ public sealed partial class BrowserPage : Page
     {
         try
         {
-            var bitmap = await _thumbs.GetAsync(item.Path, ThumbDecodeSize, CancellationToken.None);
+            // 先读这张图的非破坏性编辑参数（走内存映射，不查库、不抢锁）。
+            // 墙要按它出图 + 打角标：编辑不改原文件，不主动套参数的话，
+            // 用户在查看器里转了半天，退回来看到墙上还是老样子。
+            PhotoEdits edits = LibraryIndexService.Shared.EditsOf(item.Path);
+
+            if (edits.IsIdentity)
+            {
+                item.Edited = false;
+                item.EditSummary = "";
+            }
+            else
+            {
+                item.Edited = true;
+                item.EditSummary = edits.Describe();
+
+                // 只在"这张确实编辑过"时打一行。黑匣子里能看出
+                // "墙上到底按参数出图了没有"—— 这类"看着像没生效"的问题，
+                // 光看界面是分不清"没渲染"还是"渲染了但参数本身就是这个样子"的。
+                StartupLog.Write(
+                    $"图墙：按编辑参数出图 → {System.IO.Path.GetFileName(item.Path)}（{item.EditSummary}）");
+            }
+
+            var bitmap = await _thumbs.GetAsync(item.Path, ThumbDecodeSize, edits, CancellationToken.None);
             if (bitmap is null)
             {
                 item.MarkFailed();
@@ -2159,6 +2195,87 @@ public sealed partial class BrowserPage : Page
         catch
         {
             item.MarkFailed();
+        }
+    }
+
+    /// <summary>
+    /// 某张图的编辑参数变了 —— 把墙上对应的那一格换成新样子。
+    ///
+    /// 谁触发的：看图窗口（PhotoWindow）里的旋转 / 翻转 / 裁剪 / 调色 / 还原。
+    /// 看图窗口和缩略图墙是两个窗口，主窗口对那边干了什么一无所知，
+    /// 所以靠 <see cref="LibraryIndexService.EditsChanged"/> 这根线通知过来。
+    ///
+    /// 这里刻意**不清空旧缩略图**：新图算好之前那个位置留着旧画面，
+    /// 用户看不到"闪一下变占位图标"，只有一百来毫秒后悄悄换成新样子。
+    /// 滚出屏幕的格子会被虚拟化回收，下次出现时自然按新参数重新解 ——
+    /// 所以这里只处理"当前就在墙上"的那些。
+    /// </summary>
+    private void OnEditsChanged(string path)
+    {
+        // 事件是从改编辑的那个地方发出来的（现在是 UI 线程，但不写死这个假设），
+        // 排队回本页的 UI 线程再碰控件
+        if (!DispatcherQueue.TryEnqueue(() => RefreshEditedTile(path)))
+        {
+            StartupLog.Write($"BrowserPage: 编辑通知排队失败（已在关闭中？）→ {path}");
+        }
+    }
+
+    /// <summary>挂钩（自锁，重复调用不会挂两遍）。</summary>
+    private void HookEditsChanged()
+    {
+        if (_editsHooked) return;
+        LibraryIndexService.EditsChanged += OnEditsChanged;
+        _editsHooked = true;
+    }
+
+    /// <summary>摘钩。</summary>
+    private void UnhookEditsChanged()
+    {
+        if (!_editsHooked) return;
+        LibraryIndexService.EditsChanged -= OnEditsChanged;
+        _editsHooked = false;
+    }
+
+    /// <summary>是不是已经挂上 <see cref="LibraryIndexService.EditsChanged"/> 了。</summary>
+    private bool _editsHooked;
+
+    private void RefreshEditedTile(string path)
+    {
+        try
+        {
+            // 内存缓存里的旧图（原图那份和所有编辑变体）全部作废。
+            // 不丢的话下一句照样把旧图取回来，改了等于没改。
+            _thumbs.Invalidate(path);
+
+            ThumbnailItem? item = null;
+            foreach (var it in _items)
+            {
+                if (string.Equals(it.Path, path, StringComparison.OrdinalIgnoreCase))
+                {
+                    item = it;
+                    break;
+                }
+            }
+
+            // 不在当前这一屏里（换过目录、或在别的分类下）就到此为止：
+            // 参数已经落库了，等它下次上墙时 LoadThumbAsync 会读到新的
+            if (item is null) return;
+
+            PhotoEdits edits = LibraryIndexService.Shared.EditsOf(path);
+            item.Edited = !edits.IsIdentity;
+            item.EditSummary = edits.Describe();
+
+            // 解除"已经排队过"的封印，让它重新走一遍加载
+            item.LoadRequested = false;
+            _ = LoadThumbAsync(item);
+
+            StartupLog.Write(edits.IsIdentity
+                ? $"图墙：刷新已还原的格子 → {System.IO.Path.GetFileName(path)}"
+                : $"图墙：刷新编辑后的格子 → {System.IO.Path.GetFileName(path)}（{edits.Describe()}）");
+        }
+        catch (Exception ex)
+        {
+            StartupLog.Write("BrowserPage: 刷新编辑后的格子失败", ex);
         }
     }
 
