@@ -208,6 +208,8 @@ public sealed partial class ViewerPage : Page
         _displayWidth = 0;
         _displayHeight = 0;
         _editBytes = null;
+        _edits = new PhotoEdits();
+        _rawDecoded = null;
         ReleaseLookPixels();
     }
 
@@ -323,7 +325,23 @@ public sealed partial class ViewerPage : Page
 
         StartupLog.Write($"解码成功 {bitmap.PixelWidth}x{bitmap.PixelHeight}（请求 {decodeSize}px，用 {bitmap.DecoderName}）");
 
-        var source = await BitmapHelper.ToSourceAsync(bitmap);
+        // 编辑参数要在**渲染之前**拿到：换图必须跟着换成这张图的参数，
+        // 沿用上一张的旋转是"旋转失灵"这类怪报告最常见的来源。
+        LoadEditsFor(path);
+        _rawDecoded = bitmap;
+
+        // 按参数渲染。没编辑过时 EditRenderer 会原样返回同一个对象，不白拷像素。
+        DecodedBitmap initial = _edits.IsIdentity
+            ? bitmap
+            : await Task.Run(() => EditRenderer.Apply(bitmap, _edits));
+
+        // 这条日志是给"编辑没生效"这类问题留的：一眼能看出
+        // 参数读到没有、以及渲染之后尺寸变没变（旋转 90° 会让宽高互换）
+        StartupLog.Write(_edits.IsIdentity
+            ? $"编辑参数：无 → 显示 {initial.PixelWidth}x{initial.PixelHeight}"
+            : $"编辑参数：{_edits.Describe()} → 显示 {initial.PixelWidth}x{initial.PixelHeight}");
+
+        var source = await BitmapHelper.ToSourceAsync(initial);
         if (source is null || ct.IsCancellationRequested)
         {
             if (!ct.IsCancellationRequested)
@@ -335,8 +353,8 @@ public sealed partial class ViewerPage : Page
         }
 
         ImageView.Source = source;
-        _displayWidth = bitmap.PixelWidth;
-        _displayHeight = bitmap.PixelHeight;
+        _displayWidth = initial.PixelWidth;
+        _displayHeight = initial.PixelHeight;
 
         // 图库"幻灯片放映"按钮在图还没解出来时就点了：等这张解完立刻进放映
         if (_pendingSlide)
@@ -345,20 +363,21 @@ public sealed partial class ViewerPage : Page
             EnterSlideMode();
         }
 
-        // 翻页 = 上一张的编辑和风格统统作废（没另存就是没另存）
+        // 翻页 = 像素路的编辑作废（那是上一张的产物，没另存就是没另存）。
+        // **参数路的编辑不清** —— 它已经落进索引库、且上面刚按新图重读过。
         _editBytes = null;
         _look = default;
         _lookRendered = default;
         _basePixels = null;
         SyncSliders();
 
-        // 直方图用的就是刚解出来的这段像素。
+        // 直方图用的就是屏幕上这张的像素（**编辑之后**的那份）。
         // 记下来是为了"面板本来就开着"时不用为统计再解一次；
         // 面板关着就完全不做统计 —— 翻页时白算一张图没意义，等按 H 那一刻再算。
-        _lastDecoded = bitmap;
+        _lastDecoded = initial;
         if (_histVisible) _ = RefreshHistogramAsync();
 
-        SizeText.Text = $"{bitmap.PixelWidth} × {bitmap.PixelHeight}";
+        SizeText.Text = $"{initial.PixelWidth} × {initial.PixelHeight}";
 
         // 换图一律回到 100%，不沿用上一张的缩放（ResetZoomToActual 里有说明）。
         // 100% 是固定值，不依赖视口尺寸，所以不用像"适应窗口"那样等布局算完再重试。
@@ -2657,9 +2676,13 @@ public sealed partial class ViewerPage : Page
     /// <summary>
     /// 把选框里的部分裁出来。
     ///
-    /// 比例 → 像素的换算放在 lambda **里面**做：那里拿到的是真正要被裁的那份字节，
-    /// 拿它现量一次尺寸，所以不管前面经过多少次旋转 / 缩放 / 烘焙风格，
-    /// 算出来的矩形都落在这份字节的坐标系上，不会错位。
+    /// 走**参数路**：存的是一组归一化坐标（0~1），不是像素矩形。
+    /// 好处是把尺寸彻底解耦了 —— 在缩小的预览上裁的，和在全分辨率原图上裁的，
+    /// 算出来是同一块地方。
+    ///
+    /// 换算这里要留神：选框是按**屏幕上那张图**量的，而那张图已经套过
+    /// 旋转 / 翻转 / 上一次的裁剪了。所以不能直接把 fx/fy/fw/fh 存进去，
+    /// 得先复合上一次的裁剪框 —— 见下面几行。
     /// </summary>
     private async Task ApplyCropAsync()
     {
@@ -2672,21 +2695,26 @@ public sealed partial class ViewerPage : Page
 
         ExitSelectMode();
 
-        // 整张图就是没裁，白跑一趟编解码
+        // 整张图就是没裁，白跑一趟
         if (fw >= 0.999 && fh >= 0.999) return;
         if (fw <= 0.0005 || fh <= 0.0005) return;
 
-        await ApplyEditAsync(bytes =>
+        await ApplyEditsAsync(e =>
         {
-            var (sw, sh) = ImageEditService.SizeOf(bytes);
-            if (sw <= 0 || sh <= 0) return Array.Empty<byte>();
+            // 老框占"旋转翻转之后"那张图的比例是 (CropX, CropY, CropW, CropH)，
+            // 新框是相对**老框裁出来的结果**量的，于是复合就是乘一下：
+            //   新的起点 = 老起点 + 新起点 × 老宽
+            //   新的宽   = 新宽 × 老宽
+            // 旋转 / 翻转原样留着 —— 它们叠在裁剪更外面一层。
+            double nx = e.CropX + fx * e.CropW;
+            double ny = e.CropY + fy * e.CropH;
+            double nw = fw * e.CropW;
+            double nh = fh * e.CropH;
 
-            return ImageEditService.Crop(
-                bytes,
-                (int)Math.Round(fx * sw),
-                (int)Math.Round(fy * sh),
-                (int)Math.Round(fw * sw),
-                (int)Math.Round(fh * sh));
+            e.CropX = nx;
+            e.CropY = ny;
+            e.CropW = nw;
+            e.CropH = nh;
         });
     }
 
@@ -5657,19 +5685,196 @@ public sealed partial class ViewerPage : Page
         }
     }
 
-    // ===== 编辑：旋转 / 另存为 / 复制 / 改尺寸 / 打印 =====
+    // ===== 编辑：旋转 / 翻转 / 裁剪 / 调色 / 另存为 / 复制 / 改尺寸 / 打印 =====
 
     /*
-      编辑的原则：**只改内存，不碰原文件**。
+      编辑分两条路，**一定要分清**，混了就会出现"转一次转了两回"这种怪事。
 
-      旋转、改尺寸的结果存在 _editBytes 里，画面立刻更新，
-      但硬盘上那个文件一个字节都不动 —— 只有点了"另存为"才落盘。
-      这样反复试效果不会把原图搞坏，也不会在硬盘上堆一串中间文件。
-      翻到下一张时 _editBytes 清空，编辑跟着作废（没保存就是没保存，符合直觉）。
+      【参数路】旋转 / 翻转 / 裁剪 / 调色
+        · 只改 _edits 这一组参数，一个像素都不动；
+        · 参数存进索引库（library.db 的 Media.Edits 列），
+          翻页、关程序、重扫磁盘都还在；
+        · 显示时按参数实时渲染，随时能一键还原成原图。
+
+      【像素路】擦除（智能填充）、改尺寸、任意角度旋转
+        · 这些改的是"内容"本身，没法用参数表达，只能真的动像素；
+        · 结果存在 _editBytes 里，原文件**依然一个字节都不动**，
+          只有点"另存为"才落盘。
+
+      两条路叠加的顺序是固定的：
+
+          原文件  →  （像素路 _editBytes）  →  （参数路 _edits）  →  屏幕
+
+      所以走像素路之前必须先把 _edits 烤进字节、再清空参数
+      （见 BakeEditsAsync）。不然"旋转 90° 再擦一块"会变成
+      "擦完又被旋转一次"—— 转了两回。
     */
 
-    /// <summary>编辑之后的图像（PNG 字节）。null = 还没动过，屏幕上就是原图。</summary>
+    /// <summary>编辑之后的图像（**像素路**的产物，PNG 字节）。null = 像素没被动过。</summary>
     private byte[]? _editBytes;
+
+    /// <summary>
+    /// 当前这张图的**非破坏性编辑参数**（参数路）。
+    ///
+    /// 换图时从索引库读进来，改完立刻写回去。绝大多数图是空的
+    /// （<c>IsIdentity</c>），那种情况渲染会被整条跳过，零开销。
+    /// </summary>
+    private PhotoEdits _edits = new();
+
+    /// <summary>
+    /// 解码出来的**原始**像素（没经过任何编辑）。
+    ///
+    /// 和 <see cref="_lastDecoded"/> 的区别很关键：那个是"屏幕上正在显示的"，
+    /// 是编辑之后的；这个永远是干净的基准。
+    /// 参数渲染必须基于**它**—— 拿显示结果当基准，转两次就转 4 次了。
+    /// </summary>
+    private DecodedBitmap? _rawDecoded;
+
+    /// <summary>
+    /// 把索引库里存的那张图的编辑参数读进来。
+    ///
+    /// 换图时调。参数是跟着**路径**走的，所以换图必须重读 ——
+    /// 不重读的话上一张的旋转会原样套到下一张上，看起来像"旋转失灵"。
+    /// </summary>
+    private void LoadEditsFor(string? path)
+    {
+        _edits = path is null ? new PhotoEdits() : LibraryIndexService.Shared.EditsOf(path);
+        UpdateEditChrome();
+    }
+
+    /// <summary>
+    /// 刷新"还原"按钮的状态和提示语。
+    ///
+    /// 提示语里带上当前改了什么（<see cref="PhotoEdits.Describe"/>）——
+    /// 用户隔几天再打开一张图，能一眼看出"哦这张我转过"，
+    /// 不用靠对照原图去猜。
+    /// </summary>
+    private void UpdateEditChrome()
+    {
+        if (RevertEditButton is null) return;
+
+        bool edited = !_edits.IsIdentity || _editBytes is not null;
+        RevertEditButton.IsEnabled = edited;
+
+        string what = _edits.IsIdentity ? "像素被改过" : _edits.Describe();
+        ToolTipService.SetToolTip(RevertEditButton, edited
+            ? $"还原成原图（这张图：{what}）"
+            : "还原成原图（这张图还没编辑过）");
+    }
+
+    /// <summary>把当前参数写回索引库。索引不可用时静默跳过（编辑照样能在本次会话里用）。</summary>
+    private void SaveEditsNow()
+    {
+        string? path = _index.CurrentPath;
+        if (path is null) return;
+
+        LibraryIndexService.Shared.SetEdits(path, _edits);
+    }
+
+    /// <summary>
+    /// 按参数改编辑、落库、重新渲染并显示 —— 参数路的统一出口。
+    ///
+    /// <paramref name="rerender"/> 为假时只落库不动画面（比如用户还在拖裁剪框）。
+    /// </summary>
+    private async Task ApplyEditsAsync(Action<PhotoEdits> change, bool rerender = true)
+    {
+        change(_edits);
+        _edits = _edits.Normalized();
+        SaveEditsNow();
+        UpdateEditChrome();
+
+        if (rerender) await RenderEditsAsync();
+    }
+
+    /// <summary>
+    /// 把 _edits 烤进像素、清空参数（**走像素路之前的必经一步**）。
+    ///
+    /// 烤完之后几何变换就成了字节的一部分，调色也一样 —— 代价是这些编辑
+    /// 从此不能再单独还原（擦除本身就是不可撤销的，用户点它时已经认了）。
+    /// </summary>
+    private async Task BakeEditsAsync()
+    {
+        if (_edits.IsIdentity) return;
+
+        byte[] raw = await GetBaseBytesAsync();
+        if (raw.Length == 0) return;
+
+        _editBytes = await Task.Run(() => Bake(raw, _edits));
+        _edits = new PhotoEdits();
+        SaveEditsNow();
+    }
+
+    /// <summary>把参数作用在**全分辨率**的字节上，产出新的 PNG 字节。纯后台函数。</summary>
+    private static byte[] Bake(byte[] source, PhotoEdits edits)
+    {
+        if (edits.IsIdentity || source.Length == 0) return source;
+
+        byte[]? bgra = ImageEditService.LoadPixels(source, out int w, out int h);
+        if (bgra is null || w <= 0 || h <= 0) return source;
+
+        var decoded = new DecodedBitmap
+        {
+            Pixels = bgra,
+            PixelWidth = w,
+            PixelHeight = h,
+            // LoadPixels 走的是 Magick，出来的是**直通** alpha（没预乘）
+            Premultiplied = false,
+            DecoderName = "Magick.NET",
+        };
+
+        DecodedBitmap edited = EditRenderer.Apply(decoded, edits);
+        byte[] png = ImageEditService.FromPixels(edited.Pixels, edited.PixelWidth, edited.PixelHeight);
+        return png.Length == 0 ? source : png;
+    }
+
+    /// <summary>像素路的基准字节：已经动过像素就用那份，否则读原文件。</summary>
+    private async Task<byte[]> GetBaseBytesAsync()
+    {
+        if (_editBytes is not null) return _editBytes;
+        return await LoadOriginalBytesAsync(_index.CurrentPath ?? "") ?? Array.Empty<byte>();
+    }
+
+    /// <summary>
+    /// 按当前参数重新渲染画面。
+    ///
+    /// 渲染基于 <see cref="_rawDecoded"/> —— 也就是**屏幕上这张图解码出来的原始像素**，
+    /// 不重新读文件。理由：转一下就要读一遍 8MB 的原图，连按几下就卡住了。
+    ///
+    /// 所以屏幕上按的是"适配屏幕的那份尺寸"。导出质量不受影响：
+    /// 另存为走的是 <see cref="GetWorkingBytesAsync"/>，那里会拿全分辨率原图重算。
+    /// </summary>
+    private async Task RenderEditsAsync()
+    {
+        DecodedBitmap? raw = await EnsureRawDecodedAsync();
+        if (raw is null) return;
+
+        DecodedBitmap shown = _edits.IsIdentity
+            ? raw
+            : await Task.Run(() => EditRenderer.Apply(raw, _edits));
+
+        var source = await BitmapHelper.ToSourceAsync(shown);
+        if (source is null) return;
+
+        ImageView.Source = source;
+        _displayWidth = shown.PixelWidth;
+        _displayHeight = shown.PixelHeight;
+        SizeText.Text = $"{shown.PixelWidth} × {shown.PixelHeight}";
+
+        // 直方图统计的必须是**用户看到的**那张，不然改了颜色直方图不动，很怪
+        _lastDecoded = shown;
+        if (_histVisible) _ = RefreshHistogramAsync();
+
+        // 旋转 90° 会换宽高，滚动区域的长宽比得跟着重算，
+        // 不然图会显示在按旧比例划出来的地盘里（右下一大片空）
+        ApplyZoomToLayout();
+        Scroller.UpdateLayout();
+
+        // 参数改完，风格面板的底图就过期了（它拿的是"没套调色"的那份像素）。
+        // 这里**不重置滑块** —— 用户可能正拖到一半，把人家调的东西冲掉最招人烦。
+        _basePixels = null;
+        _lookRendered = default;
+        if (_lookVisible) _ = PrepareLookAsync(resetToSaved: false);
+    }
 
     /// <summary>把当前这张图的原始字节读出来（压缩包里的图也支持）。</summary>
     private static async Task<byte[]?> LoadOriginalBytesAsync(string path)
@@ -5693,21 +5898,38 @@ public sealed partial class ViewerPage : Page
         }
     }
 
-    /// <summary>该拿去编辑 / 保存的那份字节：编辑过就用编辑结果，否则读原文件。</summary>
+    /// <summary>
+    /// 拿去导出（另存为 / 复制 / 打印）的那份字节：**全分辨率**，参数已经烤进去。
+    ///
+    /// 为什么不直接用屏幕上那份：屏幕上是"适配屏幕尺寸"的（可能只有 1600px），
+    /// 拿它导出，8MB 的照片存出来会变成 1MB 都没到，用户一眼就能看出来。
+    /// 所以这里读原文件、在全尺寸像素上重新走一遍参数。
+    ///
+    /// **算完不写回 `_editBytes`**：那份是"像素路还没套参数"的基准，
+    /// 写回去会让参数被应用两次（`EnsureRawDecodedAsync` 会把它当基准再套一遍）。
+    /// </summary>
     private async Task<byte[]> GetWorkingBytesAsync()
     {
-        if (_editBytes is not null) return _editBytes;
-        return await LoadOriginalBytesAsync(_index.CurrentPath ?? "") ?? Array.Empty<byte>();
+        byte[] baseBytes = _editBytes
+            ?? await LoadOriginalBytesAsync(_index.CurrentPath ?? "") ?? Array.Empty<byte>();
+
+        if (baseBytes.Length == 0 || _edits.IsIdentity) return baseBytes;
+
+        return await Task.Run(() => Bake(baseBytes, _edits));
     }
 
-    /// <summary>跑一次编辑操作，然后把结果显示出来。</summary>
+    /// <summary>
+    /// 跑一次**像素路**编辑（擦除 / 改尺寸），然后把结果显示出来。
+    ///
+    /// 开头那句 <see cref="BakeEditsAsync"/> 是必须的：参数路的编辑还挂在
+    /// _edits 上，不先烤进字节就会出现"擦完又被旋转一次"这种叠加错乱。
+    /// </summary>
     private async Task ApplyEditAsync(Func<byte[], byte[]> operation)
     {
-        // 先把手上没落定的风格合进像素：否则旋转会作用在"没风格的原图"上，
-        // 屏幕上明明有风格，转完却没了，很莫名
-        await BakeLookAsync();
+        // 参数先落地成像素，接下来这一趟才是"在最终画面上继续改"
+        await BakeEditsAsync();
 
-        byte[] source = await GetWorkingBytesAsync();
+        byte[] source = await GetBaseBytesAsync();
         if (source.Length == 0) return;
 
         byte[] result = await Task.Run(() => operation(source));
@@ -5733,6 +5955,12 @@ public sealed partial class ViewerPage : Page
         _displayHeight = decoded.Height;
         SizeText.Text = $"{decoded.Width} × {decoded.Height}";
 
+        // 像素被换掉了，参数路的基准跟着作废 —— 下次要渲染时
+        // EnsureRawDecodedAsync 会从新的 _editBytes 重新解一份出来
+        _rawDecoded = null;
+        _lastDecoded = null;
+        if (_histVisible) _ = RefreshHistogramAsync();
+
         _zoom = 1.0;
         ApplyZoomToLayout();
         Scroller.UpdateLayout();
@@ -5740,8 +5968,115 @@ public sealed partial class ViewerPage : Page
         UpdateZoomText();
     }
 
+    /// <summary>
+    /// 拿"当前这张图、还没套参数路编辑"的像素基准。
+    ///
+    /// 正常情况下就是刚打开时解码出来的那份（<see cref="_rawDecoded"/>）。
+    /// 像素路动过之后它会被置空，这时从 <see cref="_editBytes"/> 重新解一份 ——
+    /// 不然旋转/调色就会作用在"改动之前"的画面上，用户会看到自己的擦除被撤销了。
+    /// </summary>
+    private async Task<DecodedBitmap?> EnsureRawDecodedAsync()
+    {
+        if (_rawDecoded is not null) return _rawDecoded;
+
+        byte[] bytes = _editBytes
+            ?? await LoadOriginalBytesAsync(_index.CurrentPath ?? "") ?? Array.Empty<byte>();
+
+        if (bytes.Length == 0) return null;
+
+        byte[]? bgra = null;
+        int w = 0, h = 0;
+        await Task.Run(() => bgra = ImageEditService.LoadPixels(bytes, out w, out h));
+
+        if (bgra is null || w <= 0 || h <= 0) return null;
+
+        _rawDecoded = new DecodedBitmap
+        {
+            Pixels = bgra,
+            PixelWidth = w,
+            PixelHeight = h,
+            // LoadPixels 走 Magick，出来的是直通 alpha（没预乘）
+            Premultiplied = false,
+            DecoderName = "Magick.NET",
+        };
+
+        return _rawDecoded;
+    }
+
     private async void RotateButton_Click(object sender, RoutedEventArgs e)
-        => await ApplyEditAsync(b => ImageEditService.Rotate(b, 90));
+        => await RotateByAsync(90);
+
+    /// <summary>
+    /// 顺时针转 90°。走**参数路**：只改 <c>_edits.Rotation</c>，
+    /// 屏幕上立刻能看到，索引库里记一笔，原文件一个字节都不动。
+    /// </summary>
+    private async Task RotateByAsync(int degrees)
+        => await ApplyEditsAsync(e => e.Rotation = ((e.Rotation + degrees) % 360 + 360) % 360);
+
+    /// <summary>左右翻转。</summary>
+    private async Task FlipHorizontalAsync()
+        => await ApplyEditsAsync(e => e.FlipH = !e.FlipH);
+
+    /// <summary>上下翻转。</summary>
+    private async Task FlipVerticalAsync()
+        => await ApplyEditsAsync(e => e.FlipV = !e.FlipV);
+
+    /// <summary>
+    /// 把这张图的编辑全部撤掉，回到原图。索引库里那一列也跟着清空。
+    ///
+    /// 会先问一句：编辑参数已经落库，还原之后再想回到"转过 90° 又调过色"
+    /// 那个状态是没有回头路的（只能重新调一遍）。
+    /// </summary>
+    private async Task RevertEditsAsync()
+    {
+        if (_edits.IsIdentity && _editBytes is null) return;
+
+        string what = _edits.IsIdentity ? "像素改动（擦除 / 改尺寸）" : _edits.Describe();
+
+        var dialog = new ContentDialog
+        {
+            Title = "还原成原图？",
+            Content = $"这张图上的编辑会全部撤掉：\n\n{what}\n\n"
+                    + "原图文件一直没被动过，所以撤掉本身是无损的；\n"
+                    + "但撤完之后这些编辑参数就找不回来了（库里那一列会被清空）。",
+            PrimaryButtonText = "还原",
+            CloseButtonText = "算了",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = XamlRoot,
+        };
+
+        try
+        {
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        }
+        catch
+        {
+            // 窗口正在关闭时 XamlRoot 会失效；弹不出来就当用户没同意
+            return;
+        }
+
+        _edits = new PhotoEdits();
+        _editBytes = null;
+
+        // ⚠️ 基准也必须扔掉。像素路改过之后 _rawDecoded 指的是"擦完那份"，
+        // 留着它的话"还原"会还成"擦过但没旋转"的样子，而不是原图。
+        _rawDecoded = null;
+
+        SaveEditsNow();
+        UpdateEditChrome();
+
+        // 参数已清空，从原文件重新解一次渲染出来就是原图
+        await RenderEditsAsync();
+    }
+
+    private async void FlipHorizontalButton_Click(object sender, RoutedEventArgs e)
+        => await FlipHorizontalAsync();
+
+    private async void FlipVerticalButton_Click(object sender, RoutedEventArgs e)
+        => await FlipVerticalAsync();
+
+    private async void RevertEditButton_Click(object sender, RoutedEventArgs e)
+        => await RevertEditsAsync();
 
     private async void SaveAsButton_Click(object sender, RoutedEventArgs e)
         => await SaveAsAsync();
@@ -5995,33 +6330,49 @@ public sealed partial class ViewerPage : Page
 
     /// <summary>
     /// 面板打开时做准备：拿到底图像素、生成滤镜缩略图、建好滑块。
-    /// 底图按"当前这张图"缓存 —— 同一次打开反复开关不会重复解码。
+    ///
+    /// <paramref name="resetToSaved"/> 为真时把滑块对齐到"这张图**当前存着的**调色"。
+    /// 为什么要有这么个开关：
+    ///   · 面板从关到开、或者换了一张图 → 要对齐（true），
+    ///     不然面板一开全是 0、图却明明有色调，用户会以为参数丢了；
+    ///   · 刚做完旋转之类、重新渲染后 → 不能对齐（false），
+    ///     那会把用户正拖着的滑块一把推回上次保存的值。
     /// </summary>
-    private async Task PrepareLookAsync()
+    private async Task PrepareLookAsync(bool resetToSaved = true)
     {
         if (_displayWidth <= 0) return;
 
+        if (resetToSaved)
+        {
+            _look = _edits.Look;
+            _lookRendered = default;   // 强制下面重算一次预览
+        }
+
         if (_basePixels is null)
         {
-            byte[] working = await GetWorkingBytesAsync();
-            if (working.Length == 0) return;
+            // 底图 = "几何套过了、但**没套调色**"的那一张。
+            //
+            // 为什么要把调色剥掉：拖滑块应该是"从这张图重新调一遍"，
+            // 而不是在上一次调色的结果上继续叠 —— 后者调两下画面就糊了，
+            // 而且"重置"永远回不到原图。
+            DecodedBitmap? raw = await EnsureRawDecodedAsync();
+            if (raw is null) return;
 
-            byte[]? pixels = null;
-            int w = 0, h = 0;
-            await Task.Run(() => pixels = ImageEditService.LoadPixels(working, out w, out h));
+            var geometryOnly = new PhotoEdits();
+            geometryOnly.CopyFrom(_edits);
+            geometryOnly.ClearTone();
 
-            if (pixels is null || w <= 0 || h <= 0)
-            {
-                await ShowMessageAsync("这张图没法调整", "读不出像素数据，可能是格式太特殊。");
-                return;
-            }
+            DecodedBitmap basis = geometryOnly.IsIdentity
+                ? raw
+                : await Task.Run(() => EditRenderer.Apply(raw, geometryOnly));
 
-            _basePixels = pixels;
-            _baseWidth = w;
-            _baseHeight = h;
+            _basePixels = basis.Pixels;
+            _baseWidth = basis.PixelWidth;
+            _baseHeight = basis.PixelHeight;
         }
 
         BuildAdjustSliders();
+        SyncSliders();
         _ = BuildFilterThumbsAsync();
         await RefreshLookPreviewAsync();
     }
@@ -6340,42 +6691,26 @@ public sealed partial class ViewerPage : Page
         => await BakeLookAsync(showMessage: true);
 
     /// <summary>
-    /// 把当前风格**全量**烘进 _editBytes（在原始分辨率上算，不是预览尺寸）。
+    /// 把"调整"面板里当前这套参数**存进这张图**。
     ///
-    /// 之后风格参数归零：效果已经进了像素，再留着参数就会叠加两次。
-    /// 另存为和复制都会先调它，所以屏幕上看到的和存出去的一定一致。
+    /// 以前这一步是"把效果烘进像素"（改 _editBytes），现在改成写进 _edits 并落库 ——
+    /// 所以调完色不用怕丢：翻页、关程序、重扫磁盘回来还是这个效果，
+    /// 而且随时能一键还原成原图。这是"非破坏性"最直观的一处体现。
+    ///
+    /// 另存为和复制也会先调它，所以屏幕上看到的和存出去的一定一致。
     /// </summary>
     private async Task BakeLookAsync(bool showMessage = false)
     {
-        if (_basePixels is null || _look.IsNeutral) return;
+        // 和已存的参数一模一样就别折腾了：白写一次库、白重渲一遍图
+        if (_look.Equals(_edits.Look)) return;
 
-        LookSettings look = _look;
-        byte[]? result = await Task.Run(() =>
-            PhotoLook.Apply(_basePixels, _baseWidth, _baseHeight, look));
+        await ApplyEditsAsync(e => e.Look = _look);
 
-        if (result is null || result.Length == 0) return;
-
-        byte[] png = await Task.Run(() =>
-            ImageEditService.FromPixels(result, _baseWidth, _baseHeight));
-
-        if (png.Length == 0)
-        {
-            if (showMessage) await ShowMessageAsync("应用失败", "这张图处理完存不下来。");
-            return;
-        }
-
-        _editBytes = png;
-        _look = default;
-        SyncSliders();
-
-        await DisplayBytesAsync(png);
-
-        // 图已经被改过了，底图得重新取（否则下次开面板还是旧的像素）。
-        // 面板还开着的话立刻补一份新的，用户接着拖滑块才不会失效。
+        _lookRendered = default;
         _basePixels = null;
-        if (_lookVisible) _ = PrepareLookAsync();
+        if (_lookVisible) _ = PrepareLookAsync(resetToSaved: false);
 
-        if (showMessage) await ShowMessageAsync("已应用", "效果已经合进图片，继续调就是在新图上叠加。");
+        if (showMessage) await ShowMessageAsync("已应用", "效果已经存进这张图，下次打开还是这个样子。");
     }
 
     // ===== 拖放 =====

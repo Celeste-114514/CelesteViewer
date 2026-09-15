@@ -232,6 +232,49 @@ public sealed class LibraryIndexService
         catch (Exception ex) { StartupLog.Write("LibraryIndexService: 列标签失败", ex); return new List<TagEntry>(); }
     }
 
+    // ===== 编辑参数（路线图第 6 步）=====
+    //
+    // 和评分 / 收藏 / 标签同类：都是**用户的操作**，重扫磁盘不该丢。
+    // 索引不可用时返回"没编辑过"（空参数），宁可暂时显示原图，也不能崩。
+
+    /// <summary>
+    /// 读一张图的非破坏性编辑参数。没编辑过（或读不到）返回空参数 ——
+    /// 空参数的 <c>IsIdentity</c> 为真，渲染时会直接跳过整条流水线。
+    /// </summary>
+    public PhotoEdits EditsOf(string path)
+    {
+        try { return Index?.GetEdits(path) ?? new PhotoEdits(); }
+        catch (Exception ex)
+        {
+            StartupLog.Write("LibraryIndexService: 读编辑参数失败", ex);
+            return new PhotoEdits();
+        }
+    }
+
+    /// <summary>
+    /// 写编辑参数。传"等于没改"的参数（或 null）等于**清除**，库里那一列变 NULL。
+    /// 存之前会过一遍 <see cref="PhotoEdits.Normalized"/> —— 保证库里永远是合法形态。
+    /// </summary>
+    public void SetEdits(string path, PhotoEdits? edits)
+    {
+        try { Index?.SetEdits(path, edits); }
+        catch (Exception ex) { StartupLog.Write("LibraryIndexService: 写编辑参数失败", ex); }
+    }
+
+    /// <summary>这张图有没有编辑过（列表上打"已编辑"角标用）。</summary>
+    public bool HasEdits(string path)
+    {
+        try { return !(Index?.GetEdits(path) ?? new PhotoEdits()).IsIdentity; }
+        catch { return false; }
+    }
+
+    /// <summary>整个库里有几张图编辑过。</summary>
+    public int CountEdited()
+    {
+        try { return Index?.CountEdited() ?? 0; }
+        catch (Exception ex) { StartupLog.Write("LibraryIndexService: 统计编辑失败", ex); return 0; }
+    }
+
     // ===== 重复 / 相似 =====
 
     /// <summary>找精确重复组（MD5 相同）。索引不可用时返回空列表。</summary>

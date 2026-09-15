@@ -565,6 +565,44 @@ internal static class Program
               new PhotoEdits { Rotation = 90, FlipH = true }.Describe().Contains("旋转")
               && new PhotoEdits { Rotation = 90, FlipH = true }.Describe().Contains("翻转"),
               new PhotoEdits { Rotation = 90, FlipH = true }.Describe());
+
+        // ---- K19: 真字节进出的完整链路（Magick 编解码 + 渲染）----
+        //
+        // 这条对应界面上的"另存为 / 复制 / 打印"：参数要作用在**全分辨率原图的字节**上。
+        // 中间得过一次 Magick 的解码和编码，和前面那些直接喂 DecodedBitmap 的用例
+        // 不是同一条路，所以单独测 —— 导出出来的图尺寸不对是最容易被用户发现的问题。
+        byte[] roundPng = ImageEditService.FromPixels(MakeIndexed(8, 6), 8, 6);
+        Check("合成 PNG：编得出来", roundPng.Length > 0, $"{roundPng.Length} 字节");
+
+        byte[]? roundPixels = ImageEditService.LoadPixels(roundPng, out int rw, out int rh);
+        Check("合成 PNG：解得回来（尺寸对得上）",
+              roundPixels is not null && rw == 8 && rh == 6, $"{rw}×{rh}");
+
+        if (roundPixels is not null)
+        {
+            var roundBmp = new DecodedBitmap
+            {
+                Pixels = roundPixels,
+                PixelWidth = rw,
+                PixelHeight = rh,
+                Premultiplied = false,       // LoadPixels 走 Magick，出来是直通 alpha
+                DecoderName = "Magick.NET",
+            };
+
+            var roundOut = EditRenderer.Apply(roundBmp,
+                                              new PhotoEdits { Rotation = 90, Look = Tone(brightness: 20) });
+            Check("真字节链路：旋转 90° 后宽高互换（8×6 → 6×8）",
+                  roundOut.PixelWidth == 6 && roundOut.PixelHeight == 8,
+                  $"{roundOut.PixelWidth}×{roundOut.PixelHeight}");
+
+            byte[] outPng = ImageEditService.FromPixels(
+                roundOut.Pixels, roundOut.PixelWidth, roundOut.PixelHeight);
+            Check("真字节链路：渲染结果能重新编码成 PNG", outPng.Length > 0, $"{outPng.Length} 字节");
+
+            var (outW, outH) = ImageEditService.SizeOf(outPng);
+            Check("真字节链路：编码出来的尺寸 = 渲染结果的尺寸（导出的图不会被转回去）",
+                  outW == 6 && outH == 8, $"{outW}×{outH}");
+        }
     }
 
     /// <summary>

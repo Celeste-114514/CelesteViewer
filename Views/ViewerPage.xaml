@@ -595,9 +595,40 @@
                         </Button>
 
                         <Button Click="RotateButton_Click"
-                                ToolTipService.ToolTip="旋转 90°（R）" Width="40" Height="40" Padding="0"
+                                ToolTipService.ToolTip="向右旋转 90°（R）" Width="40" Height="40" Padding="0"
                                 Background="Transparent" BorderThickness="0">
                             <FontIcon Glyph="&#xE7AD;" FontSize="18"/>
+                        </Button>
+
+                        <!-- 翻转：字形字体里没有"水平翻转 / 垂直翻转"这种语义的图标，
+                             拿 E8AB（Switch，一对反向箭头）当底子，
+                             上下翻转那枚把它自己转 90° —— 自己摆一个方向，
+                             比去猜一个不认识的码位可靠（猜错就是方块或空白）。 -->
+                        <Button Click="FlipHorizontalButton_Click"
+                                ToolTipService.ToolTip="左右翻转" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <FontIcon Glyph="&#xE8AB;" FontSize="18"/>
+                        </Button>
+
+                        <Button Click="FlipVerticalButton_Click"
+                                ToolTipService.ToolTip="上下翻转" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <FontIcon Glyph="&#xE8AB;" FontSize="18" RenderTransformOrigin="0.5,0.5">
+                                <FontIcon.RenderTransform>
+                                    <RotateTransform Angle="90"/>
+                                </FontIcon.RenderTransform>
+                            </FontIcon>
+                        </Button>
+
+                        <!-- 还原：把这张图上的编辑全撤掉（旋转 / 翻转 / 裁剪 / 调色）。
+                             编辑参数存在索引库里，撤了就没得找，所以点了会先问一句。
+                             按钮在"没编辑过"时是灰的 —— 没东西可撤。 -->
+                        <Button x:Name="RevertEditButton" Click="RevertEditButton_Click"
+                                ToolTipService.ToolTip="还原成原图（撤销这张图上的所有编辑）"
+                                Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0"
+                                IsEnabled="False">
+                            <FontIcon Glyph="&#xE7A7;" FontSize="18"/>
                         </Button>
 
                         <Button x:Name="SaveAsButton" Click="SaveAsButton_Click"
