@@ -15,15 +15,24 @@ using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
+// 直方图是拿 Polygon / Polyline 一笔一笔画出来的（见 RenderHistogram）
+using Microsoft.UI.Xaml.Shapes;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage;
 using Windows.Storage.Pickers;
 using Windows.Storage.Streams;
+// Windows.UI.Color —— Color 结构体在这个命名空间下（Microsoft.UI 那边只有 Colors 常量表）
+using Windows.UI;
 
 // ⚠️ Windows.Storage.Streams 里也有个 Buffer（WinRT 的字节缓冲），
 // 和 System.Buffer 撞名，同时 using 之后 `Buffer.BlockCopy` 报 CS0104 不明确引用。
 // 这里显式指向托管那个 —— 我们要的从来都是 BlockCopy
 using Buffer = System.Buffer;
+
+// ⚠️ 同理：Microsoft.UI.Xaml.Shapes 里有个画路径的 Path 控件，
+// 和 System.IO.Path 撞名，全文件几十处 `Path.GetFileName` 会一起报 CS0104。
+// 这里把 Path 钉死在 System.IO 那份，画图要用的 Polygon / Polyline / Line 直接写简单名
+using Path = System.IO.Path;
 
 namespace CelesteGallery.Views;
 
@@ -308,6 +317,12 @@ public sealed partial class ViewerPage : Page
         _basePixels = null;
         SyncSliders();
 
+        // 直方图用的就是刚解出来的这段像素。
+        // 记下来是为了"面板本来就开着"时不用为统计再解一次；
+        // 面板关着就完全不做统计 —— 翻页时白算一张图没意义，等按 H 那一刻再算。
+        _lastDecoded = bitmap;
+        if (_histVisible) _ = RefreshHistogramAsync();
+
         SizeText.Text = $"{bitmap.PixelWidth} × {bitmap.PixelHeight}";
 
         // 换图一律回到 100%，不沿用上一张的缩放（ResetZoomToActual 里有说明）。
@@ -476,6 +491,12 @@ public sealed partial class ViewerPage : Page
         CounterText.Text = "";
         EmptyText.Text = message;
         EmptyState.Visibility = Visibility.Visible;
+
+        // 直方图跟着没数据了。面板本身不关（用户开着它就让它留着），
+        // 只把上一次的图形和数据清掉 —— 留着上一张图的直方图比空着更容易误导
+        _lastDecoded = null;
+        _histForPath = null;
+        if (_histVisible) _ = RefreshHistogramAsync();
     }
 
     // ===== 翻页 =====
@@ -1200,7 +1221,7 @@ public sealed partial class ViewerPage : Page
                 break;
 
             case Windows.System.VirtualKey.Escape:
-                // 由外到内退：先退全屏，再收右侧面板，最后才退回缩略图墙
+                // 由外到内退：先退全屏，再收右侧面板，再收直方图，最后才退回缩略图墙
                 if (SafeHost?.IsFullScreen == true)
                 {
                     SafeHost.ToggleFullScreen();
@@ -1208,6 +1229,10 @@ public sealed partial class ViewerPage : Page
                 else if (AnyPanelOpen)
                 {
                     CloseSidePanels();
+                }
+                else if (_histVisible)
+                {
+                    SetHistVisible(false);
                 }
                 else
                 {
@@ -1218,6 +1243,12 @@ public sealed partial class ViewerPage : Page
 
             case Windows.System.VirtualKey.I:
                 ToggleInfo();
+                e.Handled = true;
+                break;
+
+            case Windows.System.VirtualKey.H:
+                // H = Histogram。H 一直空着，首字母也正好对得上
+                ToggleHist();
                 e.Handled = true;
                 break;
 
@@ -1469,6 +1500,262 @@ public sealed partial class ViewerPage : Page
 
     /// <summary>参数面板当前那个动画。切换前要先把它停掉，不然两个动画会抢同一个属性。</summary>
     private Storyboard? _infoStoryboard;
+
+    // ==================== 左下角「直方图」浮层（路线图第 5 步） ====================
+    //
+    // 和右侧那三个面板**刻意不互斥**：直方图是"参考信息"，调曝光的时候
+    // 正需要它和风格面板同时在。塞进互斥组里就没意义了。
+    //
+    // 所以它也不参与"点图片区收起面板"那套 —— 那个动作收的是挡住画面的右侧面板，
+    // 而左下角这块卡片本来就压在画面上、不挡视线，跟着一起消失反而添乱。
+
+    private bool _histVisible;
+    private Storyboard? _histStoryboard;
+
+    /// <summary>最近一次解码出来的位图。直方图直接拿它算，不为了统计再解一遍。</summary>
+    private DecodedBitmap? _lastDecoded;
+
+    /// <summary>算直方图的取消令牌：连按方向键时，上一张还没算完的就别算了。</summary>
+    private CancellationTokenSource? _histCts;
+
+    /// <summary>这次统计是给哪张图算的，用来丢弃"算完但已经翻页"的结果。</summary>
+    private string? _histForPath;
+
+    private void HistButton_Click(object sender, RoutedEventArgs e) => ToggleHist();
+
+    private void ToggleHist() => SetHistVisible(!_histVisible);
+
+    private void SetHistVisible(bool visible)
+    {
+        _histVisible = visible;
+
+        AnimateHistPanel(visible);
+
+        if (visible) _ = RefreshHistogramAsync();
+    }
+
+    /// <summary>
+    /// 直方图卡片的滑入滑出。和右侧面板同一套手法（只动 RenderTransform 和 Opacity，
+    /// 走合成层、不触发布局），只是方向改成从下方。
+    ///
+    /// 为什么不直接复用 <see cref="AnimateSidePanel"/>：那个方法的滑出距离要加上右边距、
+    /// 动画轴固定是 X，改成"可传轴"就得给已经跑顺的右侧三个面板动刀。
+    /// 这里重复一小段换右侧面板零风险，划算。
+    /// </summary>
+    private void AnimateHistPanel(bool visible)
+    {
+        // 卡片收起时停在"往下 60"，比卡片高度略小 —— 配合淡出，看起来是"沉下去"而不是"滑走"
+        const double HiddenOffset = 60;
+
+        // 先把当前值抄下来再停旧动画：Stop() 会把属性弹回动画开始前的值，停完再读就晚了
+        double fromY = HistPanelTranslate.Y;
+        double fromO = HistPanel.Opacity;
+
+        _histStoryboard?.Stop();
+        _histStoryboard = null;
+
+        if (visible)
+        {
+            HistPanel.Visibility = Visibility.Visible;
+            // 第一次打开时先把起点摆好，否则会先在终点闪一下、再动回去
+            if (fromO <= 0.01)
+            {
+                HistPanelTranslate.Y = HiddenOffset;
+                fromY = HiddenOffset;
+            }
+        }
+
+        var sb = new Storyboard();
+
+        var slide = new DoubleAnimation
+        {
+            From = fromY,
+            To = visible ? 0 : HiddenOffset,
+            Duration = TimeSpan.FromMilliseconds(visible ? 240 : 180),
+            EasingFunction = visible
+                ? new CubicEase { EasingMode = EasingMode.EaseOut }    // 出场：快进慢停
+                : new CubicEase { EasingMode = EasingMode.EaseIn },    // 退场：慢起快出
+        };
+        Storyboard.SetTarget(slide, HistPanelTranslate);
+        Storyboard.SetTargetProperty(slide, "Y");
+
+        // 淡入淡出比位移短一点，进出更"轻"
+        var fade = new DoubleAnimation
+        {
+            From = fromO,
+            To = visible ? 1 : 0,
+            Duration = TimeSpan.FromMilliseconds(visible ? 170 : 140),
+        };
+        Storyboard.SetTarget(fade, HistPanel);
+        Storyboard.SetTargetProperty(fade, "Opacity");
+
+        sb.Children.Add(slide);
+        sb.Children.Add(fade);
+
+        if (!visible)
+        {
+            // 判断用"卡片自己当前该不该可见"，而不是闭包里捕获的布尔 ——
+            // 中途又被打开的话这条就不生效，不会把刚打开的卡片又藏起来
+            sb.Completed += (_, _) =>
+            {
+                if (!_histVisible) HistPanel.Visibility = Visibility.Collapsed;
+            };
+        }
+
+        _histStoryboard = sb;
+        sb.Begin();
+    }
+
+    /// <summary>
+    /// 按当前这张图算直方图并画出来。
+    ///
+    /// 三个要点：
+    ///   1. **算在后台线程**。抽稀之后也就二十六万像素，但仍然不该占着 UI 线程 ——
+    ///      大图切页时那几十毫秒正好是翻页动画在跑的时候；
+    ///   2. **用已经解码好的位图**（<see cref="_lastDecoded"/>），不为了统计再解一遍；
+    ///   3. **丢弃迟到结果**。连按方向键时，上一张的统计可能在新图出来之后才算完，
+    ///      不拦的话就会把旧图的直方图画在新图上。
+    /// </summary>
+    private async Task RefreshHistogramAsync()
+    {
+        DecodedBitmap? decoded = _lastDecoded;
+        string? current = _index.CurrentPath;
+
+        if (decoded is null || current is null)
+        {
+            HistCanvas.Children.Clear();
+            HistHintText.Text = "";
+            HistStatsText.Text = "没有可统计的图片";
+            return;
+        }
+
+        _histCts?.Cancel();
+        _histCts = new CancellationTokenSource();
+        CancellationToken ct = _histCts.Token;
+
+        _histForPath = current;
+        HistHintText.Text = "统计中…";
+        HistStatsText.Text = "";
+
+        HistogramData data;
+        try
+        {
+            data = await Task.Run(() => HistogramCalculator.Compute(
+                decoded.Pixels, decoded.PixelWidth, decoded.PixelHeight), ct);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        // 算的过程里又翻页了 / 图被换了：这次结果作废
+        if (ct.IsCancellationRequested
+            || !ReferenceEquals(_lastDecoded, decoded)
+            || !string.Equals(_histForPath, current, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        RenderHistogram(data);
+    }
+
+    /// <summary>把统计结果画到 <see cref="HistCanvas"/> 上。</summary>
+    private void RenderHistogram(HistogramData data)
+    {
+        HistCanvas.Children.Clear();
+
+        double w = HistCanvas.Width;
+        double h = HistCanvas.Height;
+        if (w <= 0 || h <= 0) return;
+
+        if (data.Samples == 0)
+        {
+            HistHintText.Text = "";
+            HistStatsText.Text = "这张图没有可统计的像素（可能是全透明）";
+            return;
+        }
+
+        // 竖直分格线放在 1/4、2/4、3/4 —— 正好把"阴影 / 中间调 / 高光"分成三段
+        for (int i = 1; i <= 3; i++)
+        {
+            // +0.5 让 1px 的线落在像素中心，不然描边会摊到两个像素上、看着发虚
+            double x = Math.Round(w * i / 4) + 0.5;
+            HistCanvas.Children.Add(new Line
+            {
+                X1 = x, Y1 = 0, X2 = x, Y2 = h,
+                Stroke = new SolidColorBrush(Color.FromArgb(0x1C, 0xFF, 0xFF, 0xFF)),
+                StrokeThickness = 1,
+            });
+        }
+
+        // 画的顺序不能乱：后面画的压在上面。
+        // B → G → R 这样叠，重叠处偏红，和"屏幕三原色相加"的直觉一致。
+        AddHistSeries(HistCanvas, data.B, w, h,
+            Color.FromArgb(0x5C, 0x4A, 0x9E, 0xFF), Color.FromArgb(0xB0, 0x7A, 0xBD, 0xFF), asLine: false);
+        AddHistSeries(HistCanvas, data.G, w, h,
+            Color.FromArgb(0x5C, 0x4A, 0xE0, 0x7A), Color.FromArgb(0xB0, 0x82, 0xF0, 0xA8), asLine: false);
+        AddHistSeries(HistCanvas, data.R, w, h,
+            Color.FromArgb(0x5C, 0xFF, 0x5A, 0x5A), Color.FromArgb(0xB0, 0xFF, 0x8E, 0x8E), asLine: false);
+
+        // 亮度叠在最上面，画成**不填充**的轮廓线：
+        // 它填了就会把底下三条 RGB 全盖住，那 RGB 就白画了
+        AddHistSeries(HistCanvas, data.Luma, w, h,
+            Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), Color.FromArgb(0x99, 0xFF, 0xFF, 0xFF), asLine: true);
+
+        HistHintText.Text = $"{data.Samples:N0} 样本";
+        HistStatsText.Text =
+            $"平均亮度 {data.MeanLuma:0.0}（0~255）\n" +
+            $"暗部溢出 {data.ShadowClippedRatio * 100:0.00}%　" +
+            $"高光溢出 {data.HighlightClippedRatio * 100:0.00}%";
+    }
+
+    /// <summary>
+    /// 画一条通道：256 个桶 → 一条折线（或一块填充面积）。
+    ///
+    /// 桶数（256）和画布宽度（272）不一样，所以横坐标按比例分布；
+    /// 竖坐标用 <see cref="HistogramCalculator.ToDisplayHeights"/> 的结果，
+    /// 里面已经做过开方压缩，否则一个尖峰就能把其余 255 个桶压平。
+    /// </summary>
+    private static void AddHistSeries(
+        Canvas canvas, int[] bins, double w, double h,
+        Color fill, Color stroke, bool asLine)
+    {
+        double[] heights = HistogramCalculator.ToDisplayHeights(bins);
+        if (heights.Length == 0) return;
+
+        int last = heights.Length - 1;
+        var curve = new PointCollection();
+        for (int i = 0; i <= last; i++)
+        {
+            curve.Add(new Windows.Foundation.Point(
+                w * i / last,
+                h - heights[i] * h));
+        }
+
+        if (asLine)
+        {
+            canvas.Children.Add(new Polyline
+            {
+                Points = curve,
+                Stroke = new SolidColorBrush(stroke),
+                StrokeThickness = 1.2,
+            });
+            return;
+        }
+
+        // 填充面积：折线两端补到基线上，围成一个闭合多边形
+        var area = new PointCollection { new Windows.Foundation.Point(0, h) };
+        foreach (Windows.Foundation.Point p in curve) area.Add(p);
+        area.Add(new Windows.Foundation.Point(w, h));
+
+        canvas.Children.Add(new Polygon
+        {
+            Points = area,
+            Fill = new SolidColorBrush(fill),
+            Stroke = new SolidColorBrush(stroke),
+            StrokeThickness = 1,
+        });
+    }
 
     /// <summary>
     /// 右侧面板的滑入滑出。参数面板和风格面板共用这一套，

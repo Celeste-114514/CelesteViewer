@@ -338,6 +338,53 @@
         </Border>
 
         <!--
+          ===== 左下角「直方图」浮层 =====
+
+          刻意**不做成右侧面板**，三条理由：
+            1. 它是"边看边参考"的东西 —— 调曝光时得同时看得见图和直方图，
+               塞进右侧面板就成了来回切，反而不好用；
+            2. 右侧已经有参数 / 风格 / 文字三个面板在互斥了，再加一个会让
+               互斥关系变成四层，每加一个面板都要改另外三处；
+            3. 左下角本来就是空的（底部工具条是居中的胶囊，不占角）。
+
+          放在左下角还有个额外好处：不遮画面主体 —— 构图重心通常在中上部。
+        -->
+        <Border x:Name="HistPanel"
+                Width="300"
+                HorizontalAlignment="Left"
+                VerticalAlignment="Bottom"
+                Margin="14,0,0,86"
+                Background="#E61A1A1A"
+                BorderBrush="#2AFFFFFF"
+                BorderThickness="1"
+                CornerRadius="12"
+                Padding="14,12,14,10"
+                Opacity="0"
+                Visibility="Collapsed">
+            <Border.RenderTransform>
+                <!-- 从下方滑入 -->
+                <TranslateTransform x:Name="HistPanelTranslate" Y="60"/>
+            </Border.RenderTransform>
+            <StackPanel Spacing="6">
+                <Grid>
+                    <TextBlock Text="直方图" FontSize="12" Foreground="#88FFFFFF"/>
+                    <TextBlock x:Name="HistHintText" FontSize="11"
+                               HorizontalAlignment="Right" Foreground="#66FFFFFF"/>
+                </Grid>
+
+                <!--
+                  画布尺寸写死。直方图就是 256 个桶的一张固定图形，
+                  跟着窗口变宽只会让柱子变细、更难读；写死还能让渲染代码
+                  不用等布局算完就知道该画多大。
+                -->
+                <Canvas x:Name="HistCanvas" Width="272" Height="104" Background="#0FFFFFFF"/>
+
+                <TextBlock x:Name="HistStatsText" FontSize="11" Foreground="#99FFFFFF"
+                           TextWrapping="Wrap"/>
+            </StackPanel>
+        </Border>
+
+        <!--
           ===== 底部胶囊工具条 =====
 
           按钮会越来越多（后面还有滤镜、裁剪、标记、擦除、背景、幻灯片…），
@@ -453,6 +500,26 @@
                                 Background="Transparent" BorderThickness="0">
                             <!-- WinUI3 的 Symbol 枚举里没有 Info，只能用图标字体（Segoe MDL2 的 info 字形） -->
                             <FontIcon Glyph="&#xE946;" FontSize="18"/>
+                        </Button>
+
+                        <Button x:Name="HistButton" Click="HistButton_Click"
+                                ToolTipService.ToolTip="直方图（H）" Width="40" Height="40" Padding="0"
+                                Background="Transparent" BorderThickness="0">
+                            <!--
+                              图标直接画 4 根柱子，不用图标字体 ——
+                              Segoe MDL2 里没有一眼能认成"直方图"的字形，
+                              而 4 个 Rectangle 反而更像那么回事，也不用猜字形编号。
+                            -->
+                            <StackPanel Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+                                <Rectangle Width="3" Height="8"  RadiusX="1" RadiusY="1"
+                                           VerticalAlignment="Bottom" Fill="#CCFFFFFF"/>
+                                <Rectangle Width="3" Height="17" RadiusX="1" RadiusY="1"
+                                           VerticalAlignment="Bottom" Fill="#CCFFFFFF"/>
+                                <Rectangle Width="3" Height="12" RadiusX="1" RadiusY="1"
+                                           VerticalAlignment="Bottom" Fill="#CCFFFFFF"/>
+                                <Rectangle Width="3" Height="5"  RadiusX="1" RadiusY="1"
+                                           VerticalAlignment="Bottom" Fill="#CCFFFFFF"/>
+                            </StackPanel>
                         </Button>
 
                         <Button Click="OpenFileButton_Click"

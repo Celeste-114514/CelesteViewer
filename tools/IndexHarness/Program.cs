@@ -27,6 +27,96 @@ internal static class Program
 {
     private static int _fail;
 
+    // ==================== J. 直方图（路线图第 5 步） ====================
+
+    /// <summary>造一段纯色 BGRA 像素。B/G/R/A 四个分量都给同一个值。</summary>
+    private static byte[] MakeBgra(int width, int height, byte b, byte g, byte r, byte a = 255)
+    {
+        var px = new byte[width * height * 4];
+        for (int i = 0; i < px.Length; i += 4)
+        {
+            px[i] = b;
+            px[i + 1] = g;
+            px[i + 2] = r;
+            px[i + 3] = a;
+        }
+        return px;
+    }
+
+    private static void Histogram()
+    {
+        Console.WriteLine();
+        Console.WriteLine("==== J. 直方图 ====");
+        Console.WriteLine();
+
+        // ---- J1: 纯色图只落在一个桶上，平均亮度就是那个色阶 ----
+        var mid = HistogramCalculator.Compute(MakeBgra(64, 64, 128, 128, 128), 64, 64);
+        Check("纯灰 128：全部落在亮度桶 128",
+              mid.Luma[128] == mid.Samples && mid.Samples == 64 * 64,
+              $"{mid.Luma[128]} / {mid.Samples}");
+        Check("纯灰 128：平均亮度 = 128", Math.Abs(mid.MeanLuma - 128) < 0.01,
+              mid.MeanLuma.ToString("0.###"));
+        Check("小图不抽稀：样本数 = 总像素数", mid.Samples == 64 * 64, mid.Samples.ToString());
+
+        // ---- J2: RGB 三条通道各自落点（B/G/R 的字节顺序不能搞反）----
+        var blue = HistogramCalculator.Compute(MakeBgra(8, 8, 255, 0, 0), 8, 8);
+        Check("纯蓝：B 落 255 桶、G/R 落 0 桶",
+              blue.B[255] == blue.Samples && blue.B[0] == 0
+              && blue.G[0] == blue.Samples && blue.R[0] == blue.Samples);
+        Check("纯蓝：亮度 = 28（0.114 × 255）", Math.Abs(blue.MeanLuma - 28) < 1.0,
+              blue.MeanLuma.ToString("0.##"));
+
+        // ---- J3: 暗部 / 高光溢出 ----
+        var black = HistogramCalculator.Compute(MakeBgra(16, 16, 0, 0, 0), 16, 16);
+        Check("纯黑：暗部溢出 100%、高光 0",
+              Math.Abs(black.ShadowClippedRatio - 1.0) < 1e-9 && black.HighlightClippedRatio == 0);
+        var white = HistogramCalculator.Compute(MakeBgra(16, 16, 255, 255, 255), 16, 16);
+        Check("纯白：高光溢出 100%、暗部 0",
+              Math.Abs(white.HighlightClippedRatio - 1.0) < 1e-9 && white.ShadowClippedRatio == 0);
+
+        // ---- J4: 全透明像素不参与统计 ----
+        // 不排除的话，带透明通道的 PNG 会在 0 号桶上凭空多出一根大柱子
+        var clear = HistogramCalculator.Compute(MakeBgra(16, 16, 0, 0, 0, a: 0), 16, 16);
+        Check("全透明：样本数 0（不把透明区域的黑色算进去）", clear.Samples == 0);
+
+        // ---- J5: 大图抽稀，但结论不变 ----
+        const int Big = 2000;                        // 400 万像素，是上限的 15 倍
+        var bigPx = MakeBgra(Big, Big, 200, 200, 200);
+        var sw = Stopwatch.StartNew();
+        var big = HistogramCalculator.Compute(bigPx, Big, Big);
+        sw.Stop();
+        Check($"大图抽稀：样本数 ≤ 上限 {HistogramCalculator.DefaultMaxSamples}",
+              big.Samples > 0 && big.Samples <= HistogramCalculator.DefaultMaxSamples,
+              big.Samples.ToString());
+        Check("大图抽稀后统计仍然正确（纯色图照样全落一个桶）", big.Luma[200] == big.Samples);
+        Check("大图统计够快（< 200ms）", sw.ElapsedMilliseconds < 200, $"{sw.ElapsedMilliseconds} ms");
+
+        // ---- J6: 只读，一个字节都不改 ----
+        byte[] sample = MakeBgra(32, 32, 10, 20, 30);
+        byte[] copy = (byte[])sample.Clone();
+        HistogramCalculator.Compute(sample, 32, 32);
+        Check("只读：统计前后像素完全一致", sample.SequenceEqual(copy));
+
+        // ---- J7: 边界不炸 ----
+        Check("边界：null / 尺寸为 0 / 负尺寸 都返回空结果",
+              HistogramCalculator.Compute(null, 10, 10).Samples == 0
+              && HistogramCalculator.Compute(new byte[4], 0, 0).Samples == 0
+              && HistogramCalculator.Compute(new byte[4], -3, 5).Samples == 0);
+
+        // ---- J8: 绘图高度（开方压缩）----
+        var bins = new int[HistogramData.Bins];
+        bins[0] = 100;
+        bins[1] = 25;
+        double[] hs = HistogramCalculator.ToDisplayHeights(bins);
+        Check("高度：峰值归一化到 1.0", Math.Abs(hs[0] - 1.0) < 1e-9, hs[0].ToString("0.###"));
+        Check("高度：空桶是 0", hs[2] == 0);
+        // 线性归一的话 25/100 = 0.25；开方之后 √25/√100 = 0.5。
+        // 这一条就是"小柱子不会被大柱子压成贴地的一条线"的证据
+        Check("高度：开方压缩把小柱子抬到 0.5（线性只会是 0.25）",
+              Math.Abs(hs[1] - 0.5) < 1e-9, hs[1].ToString("0.###"));
+        Check("高度：全部落在 0~1 区间", hs.All(v => v >= 0 && v <= 1));
+    }
+
     private static void Check(string name, bool ok, string detail = "")
     {
         Console.WriteLine($"  [{(ok ? "通过" : "失败")}] {name}  {detail}");
@@ -57,6 +147,7 @@ internal static class Program
         Duplicates();
         SocialSource();
         AppIdentity();
+        Histogram();
 
         Console.WriteLine();
         Console.WriteLine(_fail == 0 ? "==== 全部通过 ====" : $"==== 有 {_fail} 项失败 ====");
