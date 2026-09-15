@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.Sqlite;
@@ -109,6 +110,23 @@ public sealed class TagEntry
     public int Count { get; init; }
 }
 
+/// <summary>一组精确重复（MD5 相同）的图。</summary>
+public sealed class DuplicateGroup
+{
+    /// <summary>这组共同的 MD5（调试/展示用）。</summary>
+    public string? Md5 { get; init; }
+    /// <summary>重复的完整路径列表。</summary>
+    public List<string> Paths { get; init; } = new();
+    public int Count => Paths.Count;
+}
+
+/// <summary>一组视觉相似的图（PHash 汉明距离 ≤ 阈值）。</summary>
+public sealed class SimilarGroup
+{
+    public List<string> Paths { get; init; } = new();
+    public int Count => Paths.Count;
+}
+
 /// <summary>一次扫描的结果。</summary>
 public sealed class IndexReport
 {
@@ -145,7 +163,7 @@ public sealed class MediaIndex : IDisposable
     /// 注意 v3 之后**不能再靠删表重建来升版**了 —— 库里开始存用户数据
     /// （评分 / 收藏 / 标签），删表等于把人家的评分悄悄清空。见 <see cref="MigrateFrom"/>。
     /// </summary>
-    private const int SchemaVersion = 3;
+    private const int SchemaVersion = 4;
 
     private readonly SqliteConnection _conn;
     private readonly object _gate = new();
@@ -241,6 +259,8 @@ public sealed class MediaIndex : IDisposable
                 FocalLength   TEXT    NULL,
                 Rating        INTEGER NOT NULL DEFAULT 0,
                 Favorite      INTEGER NOT NULL DEFAULT 0,
+                Md5           TEXT    NULL,
+                PHash         TEXT    NULL,
                 IndexedAt     INTEGER NOT NULL DEFAULT 0
             );");
 
@@ -252,6 +272,8 @@ public sealed class MediaIndex : IDisposable
         Exec("CREATE INDEX IF NOT EXISTS IX_Media_Directory   ON Media(Directory);");
         Exec("CREATE INDEX IF NOT EXISTS IX_Media_Rating      ON Media(Rating);");
         Exec("CREATE INDEX IF NOT EXISTS IX_Media_Favorite    ON Media(Favorite);");
+        // Md5 用于"精确重复"查询（按值分组）；PHash 用于"相似"两两比，不按列查，不建索引。
+        Exec("CREATE INDEX IF NOT EXISTS IX_Media_Md5         ON Media(Md5);");
 
         CreateTagsTable();
     }
@@ -299,6 +321,16 @@ public sealed class MediaIndex : IDisposable
                 Exec("ALTER TABLE Media ADD COLUMN Favorite INTEGER NOT NULL DEFAULT 0;");
 
             CreateTagsTable();
+        }
+
+        // 3 → 4：加指纹列（Md5 精确重复 + PHash 感知哈希相似）。
+        // 也都是"只加不删"，老库升级不碰已有的评分/收藏/标签。
+        if (from < 4)
+        {
+            if (!ColumnExists("Media", "Md5"))
+                Exec("ALTER TABLE Media ADD COLUMN Md5 TEXT NULL;");
+            if (!ColumnExists("Media", "PHash"))
+                Exec("ALTER TABLE Media ADD COLUMN PHash TEXT NULL;");
         }
     }
 
@@ -376,7 +408,16 @@ public sealed class MediaIndex : IDisposable
     /// 如果默认清零，用户辛苦打的分每整理一次就没一次。
     /// 回归测试 F 段专门盯着这条。
     /// </param>
-    public void Upsert(PhotoInfo info, MediaKind kind = MediaKind.Image, int? rating = null)
+    /// <param name="md5">
+    /// 文件内容的 MD5（精确重复检测用）。**传 null = 保留原值**——
+    /// 这是派生数据，本该每次重扫都重算，但万一哪次调用方没传，
+    /// 也不至于把已经算好的指纹清掉（扫描时调用方总是会传）。
+    /// </param>
+    /// <param name="phash">
+    /// 感知哈希（相似检测用，见 <see cref="PerceptualHash"/>）。同样传 null 保留原值。
+    /// </param>
+    public void Upsert(PhotoInfo info, MediaKind kind = MediaKind.Image,
+                       int? rating = null, string? md5 = null, string? phash = null)
     {
         if (string.IsNullOrEmpty(info.Path)) return;
 
@@ -389,13 +430,13 @@ public sealed class MediaIndex : IDisposable
                     FileSize, ModifiedTicks, PixelWidth, PixelHeight,
                     DateTaken, DateEstimated, CameraMake, CameraModel, LensModel,
                     FNumber, ExposureTime, IsoSpeed, FocalLength,
-                    Rating, IndexedAt)
+                    Rating, Md5, PHash, IndexedAt)
                 VALUES (
                     $path, $lower, $dir, $name, $kind,
                     $size, $ticks, $w, $h,
                     $date, $est, $make, $model, $lens,
                     $fnum, $exp, $iso, $focal,
-                    COALESCE($rating, 0), $now)
+                    COALESCE($rating, 0), $md5, $phash, $now)
                 -- 注意：下面 DO UPDATE 里**故意不写 Favorite**。
                 -- 文件重扫一遍不该把用户标的收藏冲掉，不写就等于保留原值。
                 ON CONFLICT(Path) DO UPDATE SET
@@ -419,6 +460,10 @@ public sealed class MediaIndex : IDisposable
                     -- 没传评分就保留原来的（COALESCE 的第二个 Rating 指更新前的那一行）。
                     -- 写死成 excluded.Rating 的话，整理一次图库评分就全清零了。
                     Rating        = COALESCE($rating, Rating),
+                    -- Md5 / PHash 是派生数据：扫描时调用方总是会传新值（覆盖更新），
+                    -- 万一某次没传（理论上不该发生），保留原值，别把算好的指纹清掉。
+                    Md5           = COALESCE(excluded.Md5, Md5),
+                    PHash         = COALESCE(excluded.PHash, PHash),
                     IndexedAt     = excluded.IndexedAt;";
 
             string dir = string.Empty;
@@ -446,6 +491,8 @@ public sealed class MediaIndex : IDisposable
             cmd.Parameters.AddWithValue("$iso", (object?)info.IsoSpeed ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$focal", (object?)info.FocalLength ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$rating", (object?)rating ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$md5", (object?)md5 ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$phash", (object?)phash ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
 
             cmd.ExecuteNonQuery();
@@ -493,6 +540,31 @@ public sealed class MediaIndex : IDisposable
             tag.CommandText = "DELETE FROM Tags WHERE Path = $p;";
             tag.Parameters.AddWithValue("$p", path);
             tag.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>
+    /// 批量删记录（"查找重复"里把若干张移到回收站后用）。
+    /// 每条都顺带清孤儿标签，逻辑和 <see cref="Remove"/> 一致。
+    /// </summary>
+    public void RemoveMany(IEnumerable<string> paths)
+    {
+        lock (_gate)
+        {
+            foreach (string path in paths)
+            {
+                if (string.IsNullOrEmpty(path)) continue;
+
+                using var cmd = _conn.CreateCommand();
+                cmd.CommandText = "DELETE FROM Media WHERE Path = $p;";
+                cmd.Parameters.AddWithValue("$p", path);
+                cmd.ExecuteNonQuery();
+
+                using var tag = _conn.CreateCommand();
+                tag.CommandText = "DELETE FROM Tags WHERE Path = $p;";
+                tag.Parameters.AddWithValue("$p", path);
+                tag.ExecuteNonQuery();
+            }
         }
     }
 
@@ -583,6 +655,113 @@ public sealed class MediaIndex : IDisposable
             }
         }
     }
+
+    // ===== 重复 / 相似 =====
+    //
+    // 这两类查询不走 WHERE 过滤，是"全库两两比"：
+    //   · FindDuplicates 按 Md5 分组（字节级完全相同）
+    //   · FindSimilar 按 PHash 汉明距离归组（视觉相近）
+    // 结果直接喂给"查找重复"智能相册，界面按组展示。
+
+    /// <summary>
+    /// 找精确重复：MD5 完全相同的图，每组 ≥ 2 张。
+    /// 返回空列表 = 没有重复（不是出错）。
+    /// </summary>
+    public List<DuplicateGroup> FindDuplicates()
+    {
+        var groups = new List<DuplicateGroup>();
+        lock (_gate)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT Md5 FROM Media
+                WHERE Md5 IS NOT NULL
+                GROUP BY Md5 HAVING COUNT(*) > 1;";
+
+            var md5s = new List<string>();
+            using (var r = cmd.ExecuteReader())
+                while (r.Read()) md5s.Add(r.GetString(0));
+
+            foreach (string m in md5s)
+            {
+                using var q = _conn.CreateCommand();
+                q.CommandText = "SELECT Path FROM Media WHERE Md5 = $m;";
+                q.Parameters.AddWithValue("$m", m);
+
+                var g = new DuplicateGroup { Md5 = m };
+                using var r = q.ExecuteReader();
+                while (r.Read()) g.Paths.Add(r.GetString(0));
+                groups.Add(g);
+            }
+        }
+        return groups;
+    }
+
+    /// <summary>
+    /// 找视觉相似：PHash 汉明距离 ≤ <paramref name="threshold"/> 的图归为一组。
+    /// 阈值越小越严格（只捞几乎一样的）；越大越松（连同构图不同曝光也算相似）。
+    /// 默认 10 对 64 位哈希来说已经比较宽松，能捞到"同一场景不同参数"，
+    /// 又不至于把完全不同的图乱凑一起。
+    /// </summary>
+    public List<SimilarGroup> FindSimilar(int threshold = 10)
+    {
+        List<(string Path, string PHash)> items;
+        lock (_gate)
+        {
+            items = new List<(string, string)>();
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT Path, PHash FROM Media WHERE PHash IS NOT NULL;";
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) items.Add((r.GetString(0), r.GetString(1)));
+        }
+
+        if (items.Count == 0) return new List<SimilarGroup>();
+
+        // path → phash 字典，避免每次都线性查找代表图
+        var phashOf = new Dictionary<string, string>(items.Count);
+        foreach (var it in items) phashOf[it.Path] = it.PHash;
+
+        var groups = new List<SimilarGroup>();
+        foreach (var item in items)
+        {
+            // 贪心：并入第一个"代表图跟它距离 ≤ 阈值"的组。
+            // 贪心不保证全局最优（A 像 B、B 像 C 但 A 不像 C 时可能分两组），
+            // 但对"找重复"够用，且 O(N²) 对几千张图一两秒完事。
+            SimilarGroup? hit = null;
+            foreach (var g in groups)
+            {
+                if (PerceptualHash.HammingDistance(item.PHash, phashOf[g.Paths[0]]) <= threshold)
+                {
+                    hit = g;
+                    break;
+                }
+            }
+
+            if (hit is null) groups.Add(new SimilarGroup { Paths = new List<string> { item.Path } });
+            else hit.Paths.Add(item.Path);
+        }
+
+        // 只有 1 张的"组"不算相似，过滤掉
+        return groups.Where(g => g.Count > 1).ToList();
+    }
+
+    /// <summary>有多少组精确重复（给智能相册入口显示红点数字用）。</summary>
+    public int CountDuplicates()
+    {
+        lock (_gate)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT COUNT(*) FROM (
+                    SELECT Md5 FROM Media WHERE Md5 IS NOT NULL
+                    GROUP BY Md5 HAVING COUNT(*) > 1
+                );";
+            return Convert.ToInt32(cmd.ExecuteScalar() ?? 0);
+        }
+    }
+
+    /// <summary>有多少组相似（默认阈值）。</summary>
+    public int CountSimilar(int threshold = 10) => FindSimilar(threshold).Count;
 
     // ==================== 评分 / 收藏 / 标签 ====================
     //
@@ -818,7 +997,11 @@ public sealed class MediaIndex : IDisposable
                     }
                     else
                     {
-                        Upsert(info);
+                        // 顺手把指纹也算了：MD5 字节级（精确重复），PHash 解码缩略（相似）。
+                        // 失败（格式不支持/损坏）会是 null，Upsert 用 COALESCE 保留原值，不崩。
+                        string? md5 = PerceptualHash.ComputeMd5(path);
+                        string? phash = PerceptualHash.ComputePhash(path);
+                        Upsert(info, md5: md5, phash: phash);
                         if (existed) report.Updated++; else report.Added++;
                     }
                 }
@@ -839,6 +1022,69 @@ public sealed class MediaIndex : IDisposable
         report.Removed = RemoveStale(new[] { folder });
         progress?.Report(Clone(report));
         return report;
+    }
+
+    /// <summary>
+    /// 给老库 / 从来没算过指纹的记录补算 Md5（+ 可选 PHash）。
+    ///
+    /// 为什么需要它：增量扫描只给"新图或变更图"算指纹；
+    /// 但 v3→v4 升上来的库、或用户第一次点"查找重复"之前，
+    /// 库里大量图是带着指纹 null 的。不补齐，FindDuplicates / FindSimilar 就查不出东西。
+    /// 用在"查找重复/相似"入口首次打开时，先确保指纹齐全再查（带进度回报，可取消）。
+    ///
+    /// <param name="computePhash">是否顺带算 PHash（视觉相似需要）。
+    /// 只查"精确重复"（MD5）时传 false，可跳过 PHash 这条要动用 Magick 解码的慢路径，
+    /// 只做纯 C# 的字节哈希，几千张图一两秒完事。</param>
+    /// </summary>
+    public async Task<int> BackfillHashesAsync(bool computePhash = true,
+                                               IProgress<int>? progress = null,
+                                               CancellationToken ct = default)
+    {
+        List<string> paths;
+        lock (_gate)
+        {
+            paths = new List<string>();
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = computePhash
+                ? "SELECT Path FROM Media WHERE Md5 IS NULL OR PHash IS NULL;"
+                : "SELECT Path FROM Media WHERE Md5 IS NULL;";
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) paths.Add(r.GetString(0));
+        }
+
+        int done = 0;
+        foreach (string path in paths)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            string? md5 = null;
+            string? phash = null;
+            try
+            {
+                // 文件可能已经被删了（索引里还有幽灵记录），算不了就跳过
+                if (File.Exists(path))
+                {
+                    md5 = PerceptualHash.ComputeMd5(path);
+                    if (computePhash) phash = PerceptualHash.ComputePhash(path);
+                }
+            }
+            catch { }
+
+            lock (_gate)
+            {
+                using var cmd = _conn.CreateCommand();
+                cmd.CommandText = "UPDATE Media SET Md5 = $m, PHash = $p WHERE Path = $path;";
+                cmd.Parameters.AddWithValue("$m", (object?)md5 ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$p", (object?)phash ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$path", path);
+                cmd.ExecuteNonQuery();
+            }
+
+            if (++done % 50 == 0) progress?.Report(done);
+        }
+
+        progress?.Report(done);
+        return done;
     }
 
     private static IndexReport Clone(IndexReport r) => new()

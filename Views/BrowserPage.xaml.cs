@@ -901,10 +901,354 @@ public sealed partial class BrowserPage : Page
         if (IndexMode) await LoadFromIndexAsync();
     }
 
-    /// <summary>E734 空心星 = 没开；E735 实心星 = 开着。跟右键菜单里用的图标一致。</summary>
-    private void UpdateFavIcon() => FavIcon.Glyph = _favOnly ? "\uE735" : "\uE734";
+        /// <summary>E734 空心星 = 没开；E735 实心星 = 开着。跟右键菜单里用的图标一致。</summary>
+        private void UpdateFavIcon() => FavIcon.Glyph = _favOnly ? "\uE735" : "\uE734";
 
-    /// <summary>右键点在墙的空白处（没落在某张图上）。</summary>
+        // ===== 工具栏"查找重复 / 相似"智能相册 =====
+        //
+        // 和"只看收藏"平级的第二个智能相册。它和收藏最大的不同是：
+        // 结果不是"一条平铺的过滤列表"，而是"一组一组的重复/相似图"，
+        // 所以不能用现成的 Query 那条路，得单独把结果铺到 DupPanel 里，
+        // 每组默认保留第一张、其余可以被"移到回收站"（可还原，不是硬删）。
+
+        /// <summary>查重视图的子模式。</summary>
+        private enum DupMode { None, Exact, Similar }
+
+        /// <summary>当前查重子模式。None = 没在查重视图里。</summary>
+        private DupMode _dupMode = DupMode.None;
+
+        /// <summary>DupToggle 是否开着（= 是否进入了查重视图）。</summary>
+        private bool _dupActive;
+
+        /// <summary>同步那两个子开关时挡一下，避免互相取消又触发渲染。</summary>
+        private bool _dupUiSyncing;
+
+        /// <summary>查重结果：每一组是一份 ThumbnailItem 集合（第一张默认"保留"）。</summary>
+        private readonly List<ObservableCollection<ThumbnailItem>> _dupGroups = new();
+
+        /// <summary>进入查重前记住该回哪个视图，退出时还原（避免把用户之前的浏览状态弄丢）。</summary>
+        private DupReturnState? _dupReturn;
+
+        /// <summary>进入查重前要记住的视图状态（用于退出时还原）。</summary>
+        private sealed class DupReturnState
+        {
+            public string? CurrentFolder;
+            public GroupBy GroupBy;
+            public string? GroupValue;
+            public string SearchText = "";
+            public string? TagFilter;
+            public bool FavOnly;
+            public SortKey? SortOverride;
+        }
+
+        private async void DupToggle_Checked(object sender, RoutedEventArgs e)
+        {
+            var svc = LibraryIndexService.Shared;
+            if (!svc.Available)
+            {
+                _dupActive = false;
+                try { DupToggle.IsChecked = false; } catch { }
+                ShowEmpty("索引库打不开，查找重复功能暂时用不了");
+                return;
+            }
+
+            // 记住现在的视图，退出时还原
+            _dupReturn = new DupReturnState
+            {
+                CurrentFolder = _currentFolder,
+                GroupBy = _groupBy,
+                GroupValue = _groupValue,
+                SearchText = _searchText,
+                TagFilter = _tagFilter,
+                FavOnly = _favOnly,
+                SortOverride = _sortOverride,
+            };
+
+            _dupActive = true;
+            _dupMode = DupMode.Exact;
+
+            // 切到查重视图：藏起主墙，亮出查重面板和命令条
+            GridScroller.Visibility = Visibility.Collapsed;
+            EmptyState.Visibility = Visibility.Collapsed;
+            MultiSelectBar.Visibility = Visibility.Collapsed;
+            DupPanel.Visibility = Visibility.Visible;
+            DupBar.Visibility = Visibility.Visible;
+
+            // 同步子开关（精确重复默认勾上）
+            _dupUiSyncing = true;
+            try { DupExactToggle.IsChecked = true; DupSimilarToggle.IsChecked = false; }
+            finally { _dupUiSyncing = false; }
+
+            // 索引还是空的，先整理一遍（顺带算好指纹）
+            if (svc.Count == 0) await EnsureIndexedAsync();
+
+            await RenderDupViewAsync();
+        }
+
+        private async void DupToggle_Unchecked(object sender, RoutedEventArgs e)
+            => await ExitDupModeAsync();
+
+        /// <summary>退出查重视图，还原进入前的浏览状态。幂等。</summary>
+        private async Task ExitDupModeAsync()
+        {
+            if (!_dupActive && _dupMode == DupMode.None) return;
+
+            _dupActive = false;
+            _dupMode = DupMode.None;
+            _dupGroups.Clear();
+            DupGroups.Children.Clear();
+            DupStatusText.Text = "";
+
+            DupPanel.Visibility = Visibility.Collapsed;
+            DupBar.Visibility = Visibility.Collapsed;
+            GridScroller.Visibility = Visibility.Visible;
+
+            var state = _dupReturn;
+            _dupReturn = null;
+
+            if (state is null)
+            {
+                ShowEmpty("从左边选一个文件夹");
+                return;
+            }
+
+            _currentFolder = state.CurrentFolder;
+            _groupBy = state.GroupBy;
+            _groupValue = state.GroupValue;
+            _searchText = state.SearchText;
+            _tagFilter = state.TagFilter;
+            _favOnly = state.FavOnly;
+            _sortOverride = state.SortOverride;
+
+            BuildTree();
+            if (IndexMode) await LoadFromIndexAsync();
+            else if (_currentFolder is not null) await LoadFolderAsync(_currentFolder);
+            else ShowEmpty("从左边选一个文件夹");
+        }
+
+        private void DupExitButton_Click(object sender, RoutedEventArgs e)
+        {
+            // 走 DupToggle 的 Unchecked 统一退出，避免两处各写一遍还原逻辑
+            DupToggle.IsChecked = false;
+        }
+
+        /// <summary>切精确重复 / 相似：同步子开关 + 重算结果。</summary>
+        private void SetDupMode(DupMode mode)
+        {
+            _dupMode = mode;
+            _dupUiSyncing = true;
+            try
+            {
+                DupExactToggle.IsChecked = mode == DupMode.Exact;
+                DupSimilarToggle.IsChecked = mode == DupMode.Similar;
+            }
+            finally { _dupUiSyncing = false; }
+
+            _ = RenderDupViewAsync();
+        }
+
+        private void DupExactToggle_Checked(object sender, RoutedEventArgs e)
+        {
+            if (_dupUiSyncing) return;
+            SetDupMode(DupMode.Exact);
+        }
+
+        private void DupExactToggle_Unchecked(object sender, RoutedEventArgs e)
+        {
+            if (_dupUiSyncing) return;
+            // 两个不能都空：另一个没勾时才把这一颗按回去
+            if (DupSimilarToggle.IsChecked != true) DupExactToggle.IsChecked = true;
+        }
+
+        private void DupSimilarToggle_Checked(object sender, RoutedEventArgs e)
+        {
+            if (_dupUiSyncing) return;
+            SetDupMode(DupMode.Similar);
+        }
+
+        private void DupSimilarToggle_Unchecked(object sender, RoutedEventArgs e)
+        {
+            if (_dupUiSyncing) return;
+            if (DupExactToggle.IsChecked != true) DupSimilarToggle.IsChecked = true;
+        }
+
+        /// <summary>查重复 / 查相似：补齐指纹 → 查分组 → 铺到 DupPanel。</summary>
+        private async Task RenderDupViewAsync()
+        {
+            var svc = LibraryIndexService.Shared;
+            if (!svc.Available) { DupStatusText.Text = "索引库不可用"; return; }
+
+            DupStatusText.Text = "正在查找…";
+            DupGroups.Children.Clear();
+            _dupGroups.Clear();
+
+            // 首次进入或指纹不全时先补齐指纹。
+            // 精确重复只要 MD5（纯 C# 哈希，快）；相似还要 PHash（要动用 Magick 解码，慢，
+            // 但只在切到"相似图片"时才算，不会拖慢精确重复）。
+            bool needPhash = _dupMode == DupMode.Similar;
+            int backfilled = await Task.Run(
+                () => svc.BackfillHashesAsync(needPhash, null, CancellationToken.None));
+            StartupLog.Write($"BrowserPage: 查重前补算指纹 {backfilled} 条（phash={needPhash}）");
+
+            // 在后台线程跑 SQLite 查询，不挡 UI
+            List<DuplicateGroup>? dups = null;
+            List<SimilarGroup>? sims = null;
+            await Task.Run(() =>
+            {
+                if (_dupMode == DupMode.Similar) sims = svc.FindSimilar(10);
+                else dups = svc.FindDuplicates();
+            });
+
+            int totalImages = 0;
+
+            if (dups is not null)
+            {
+                for (int i = 0; i < dups.Count; i++)
+                {
+                    if (dups[i].Count < 2) continue;
+                    totalImages += AddDupGroup(i + 1, dups[i].Paths);
+                }
+            }
+            else if (sims is not null)
+            {
+                for (int i = 0; i < sims.Count; i++)
+                {
+                    if (sims[i].Count < 2) continue;
+                    totalImages += AddDupGroup(i + 1, sims[i].Paths);
+                }
+            }
+
+            if (_dupGroups.Count == 0)
+            {
+                DupStatusText.Text = _dupMode == DupMode.Similar
+                    ? "没有发现视觉相似的图片"
+                    : "没有发现完全重复的图片";
+                var tip = new TextBlock
+                {
+                    Text = DupStatusText.Text,
+                    FontSize = 14,
+                    Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Gray),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Margin = new Thickness(0, 40, 0, 0),
+                };
+                DupGroups.Children.Add(tip);
+                return;
+            }
+
+            DupStatusText.Text = $"找到 {_dupGroups.Count} 组 · 共 {totalImages} 张　" +
+                                 "（点图可改「保留」哪张，再点「未保留的移到回收站」）";
+        }
+
+        /// <summary>把一组路径建成一个"组块"（标题 + 横向缩略图排）塞进 DupPanel，返回这组图数量。</summary>
+        private int AddDupGroup(int index, List<string> paths)
+        {
+            var items = new ObservableCollection<ThumbnailItem>(
+                paths.Select(p => new ThumbnailItem { Path = p, FileName = Path.GetFileName(p) }));
+            if (items.Count > 0) items[0].IsKeep = true;   // 默认保留每组第一张
+            _dupGroups.Add(items);
+
+            var block = new StackPanel
+            {
+                Spacing = 6,
+                Margin = new Thickness(0, 0, 0, 14),
+            };
+
+            block.Children.Add(new TextBlock
+            {
+                Text = $"第 {index} 组 · 共 {items.Count} 张",
+                FontSize = 13,
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.LightGray),
+            });
+
+            var repeater = new ItemsRepeater
+            {
+                Layout = new UniformGridLayout
+                {
+                    MinItemWidth = 150,
+                    MinItemHeight = 150,
+                    MinColumnSpacing = 6,
+                    MinRowSpacing = 6,
+                    ItemsStretch = UniformGridLayoutItemsStretch.Fill,
+                    Orientation = Orientation.Horizontal,
+                    MaximumRowsOrColumns = 12,
+                },
+                ItemTemplate = (DataTemplate)Resources["TileTemplate"],
+                ItemsSource = items,
+            };
+            repeater.ElementPrepared += DupThumbs_ElementPrepared;
+            block.Children.Add(repeater);
+
+            DupGroups.Children.Add(block);
+            return items.Count;
+        }
+
+        /// <summary>查重视图里每个组块的格子出现时才解码（和主墙同一个节流逻辑）。</summary>
+        private void DupThumbs_ElementPrepared(ItemsRepeater sender, ItemsRepeaterElementPreparedEventArgs args)
+        {
+            if (sender.ItemsSource is not System.Collections.IList list) return;
+            if (args.Index < 0 || args.Index >= list.Count) return;
+            if (list[args.Index] is not ThumbnailItem item) return;
+            if (item.LoadRequested) return;
+
+            item.LoadRequested = true;
+            _ = LoadThumbAsync(item);
+        }
+
+        /// <summary>在一组里切换"保留"那张：清掉别的、把这一张标成保留。</summary>
+        private void ToggleDupKeep(ThumbnailItem item)
+        {
+            var group = _dupGroups.FirstOrDefault(g => g.Contains(item));
+            if (group is null || item.IsKeep) return;   // 已经是保留的，点了没意义
+
+            foreach (var it in group) it.IsKeep = false;
+            item.IsKeep = true;
+        }
+
+        /// <summary>把没标"保留"的图移到回收站（可还原），并刷新查重结果。</summary>
+        private async void DupDeleteButton_Click(object sender, RoutedEventArgs e)
+        {
+            var toRemove = new List<string>();
+            foreach (var g in _dupGroups)
+                foreach (var it in g)
+                    if (!it.IsKeep) toRemove.Add(it.Path);
+
+            if (toRemove.Count == 0)
+            {
+                DupStatusText.Text = "没有需要删除的（每组都已保留一张）";
+                return;
+            }
+
+            var dialog = new ContentDialog
+            {
+                XamlRoot = this.XamlRoot,
+                Title = "移到回收站",
+                Content = $"将把 {toRemove.Count} 张未保留的图片移到回收站。\n" +
+                          "回收站里的文件可以在资源管理器里还原，不会立即永久删除。",
+                PrimaryButtonText = "移到回收站",
+                CloseButtonText = "取消",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+
+            DupStatusText.Text = "正在移动…";
+
+            var (moved, aborted) = await Task.Run(() => RecycleBin.Send(toRemove));
+
+            if (moved == 0)
+            {
+                DupStatusText.Text = aborted ? "移动失败或被取消" : "没有文件被移动";
+                return;
+            }
+
+            // 从索引里删掉这些记录，免得下次查重它们又冒出来
+            LibraryIndexService.Shared.RemovePaths(toRemove);
+
+            // 重新查一遍：被移走的图不在了，剩下的组只剩"保留"那张 → 查重结果会清空
+            await RenderDupViewAsync();
+        }
+
+        /// <summary>右键点在墙的空白处（没落在某张图上）。</summary>
     private void Wall_ContextRequested(UIElement sender, ContextRequestedEventArgs args)
     {
         var flyout = new MenuFlyout();
@@ -1643,6 +1987,13 @@ public sealed partial class BrowserPage : Page
 
     private void Thumb_Tapped(object sender, TappedRoutedEventArgs e)
     {
+        // 查找重复模式：点一下 = 在这组里切换"保留"那张（不走选中/打开那套逻辑）
+        if (_dupMode != DupMode.None)
+        {
+            if (sender is FrameworkElement fe && fe.DataContext is ThumbnailItem di) ToggleDupKeep(di);
+            return;
+        }
+
         var item = ItemOf(sender);
         if (item is null) return;
 

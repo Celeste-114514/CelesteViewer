@@ -7,6 +7,9 @@ using System.Threading.Tasks;
 using CelesteViewer.Services;
 using ImageMagick;
 using Microsoft.Data.Sqlite;
+// PerceptualHash 在我的代码里是 CelesteViewer.Services.PerceptualHash；
+// ImageMagick 命名空间里也有一个同名类型，用别名把简单名指向我的那份，消除歧义。
+using PerceptualHash = CelesteViewer.Services.PerceptualHash;
 
 namespace CelesteViewer.IndexHarness;
 
@@ -51,6 +54,7 @@ internal static class Program
         await Signature();
         await MagickFallback();
         UserData();
+        Duplicates();
 
         Console.WriteLine();
         Console.WriteLine(_fail == 0 ? "==== 全部通过 ====" : $"==== 有 {_fail} 项失败 ====");
@@ -1007,6 +1011,142 @@ internal static class Program
 
         CheckMigrate();
     }
+
+    // ==================== G. 重复 / 相似 ====================
+
+    /// <summary>
+    /// 验证两张事：精确重复（MD5）和视觉相似（PHash 汉明距离）。
+    /// 用真图端到端测一遍，再塞一组伪造指纹锁死"查询 + 汉明分组"逻辑，
+    /// 这样万一 PHash 在某环境算不出来，核心逻辑也还是被验证到。
+    /// </summary>
+    private static void Duplicates()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== G. 重复 / 相似 ===");
+        Console.WriteLine();
+
+        string dir = Path.Combine(Path.GetTempPath(), "cvdup-" + Guid.NewGuid().ToString("N"));
+        try { Directory.CreateDirectory(dir); } catch { }
+
+        try
+        {
+            // 造一张基础图：白底上一个黑方块（让 PHash 有内容可比）
+            string basePng = Path.Combine(dir, "base.png");
+            MakeImage(basePng, MagickColors.White, MagickColors.Black, 10, 10);
+
+            // 原样复制成 3 份 → 字节完全相同 → MD5 相同 → 精确重复
+            string dup1 = Path.Combine(dir, "dup1.png");
+            string dup2 = Path.Combine(dir, "dup2.png");
+            File.Copy(basePng, dup1);
+            File.Copy(basePng, dup2);
+
+            // 几乎一样但字节不同：黑方块挪 2 像素 → PHash 相近、MD5 不同
+            string similar = Path.Combine(dir, "similar.png");
+            MakeImage(similar, MagickColors.White, MagickColors.Black, 12, 12);
+
+            // 一张完全不同的图（纯红）
+            string other = Path.Combine(dir, "other.png");
+            MakeImage(other, MagickColors.Red, null, 0, 0);
+
+            string db = Path.Combine(Path.GetTempPath(), "cvidx-dup.db");
+            foreach (string f in new[] { db, db + "-wal", db + "-shm" })
+            { try { File.Delete(f); } catch { } }
+
+            using var index = new MediaIndex(db);
+
+            foreach (string p in new[] { basePng, dup1, dup2, similar, other })
+            {
+                string? md5 = PerceptualHash.ComputeMd5(p);
+                string? phash = PerceptualHash.ComputePhash(p);
+                index.Upsert(PhotoOf(p), md5: md5, phash: phash);
+            }
+
+            // G1: 精确重复 = 3 张（base/dup1/dup2），且只有 1 组
+            var dups = index.FindDuplicates();
+            int dupTotal = dups.Sum(g => g.Count);
+            Check("精确重复：3 张同 MD5 归 1 组", dupTotal == 3 && dups.Count == 1,
+                  $"{dupTotal} 张 / {dups.Count} 组");
+
+            // G2: 相似图、完全不同的图不能混进精确重复
+            bool dupLeak = dups.Any(g => g.Paths.Any(p =>
+                p.EndsWith("similar.png", StringComparison.OrdinalIgnoreCase) ||
+                p.EndsWith("other.png", StringComparison.OrdinalIgnoreCase)));
+            Check("精确重复不掺入相似图 / 异图", !dupLeak);
+
+            // G3: 完全不同的图（全红）和 base（白底黑块）必然相差很远，绝不该归一组
+            var sims = index.FindSimilar(10);
+            bool mixed = sims.Any(g => g.Paths.Any(p => p.EndsWith("other.png", StringComparison.OrdinalIgnoreCase))
+                                      && g.Paths.Any(p => p.EndsWith("base.png", StringComparison.OrdinalIgnoreCase)));
+            Check("相似：完全不同的图不会和别的图乱归组", !mixed);
+
+            // 若 PHash 本环境真算出来了，base 与 similar 应该归同组（它们只差 2 像素）
+            string? pb = PerceptualHash.ComputePhash(basePng);
+            string? ps = PerceptualHash.ComputePhash(similar);
+            if (pb is not null && ps is not null && PerceptualHash.HammingDistance(pb, ps) <= 10)
+            {
+                bool same = sims.Any(g => g.Paths.Any(p => p.EndsWith("base.png", StringComparison.OrdinalIgnoreCase))
+                                         && g.Paths.Any(p => p.EndsWith("similar.png", StringComparison.OrdinalIgnoreCase)));
+                Check("相似（端到端）：base 与 similar 归同组", same);
+            }
+            else
+            {
+                Console.WriteLine("  [跳过] 本环境 PHash 未算出，相似归组由 G6 伪造指纹验证");
+            }
+
+            // G4: 汉明距离直接计算正确
+            Check("汉明距离：相同 = 0", PerceptualHash.HammingDistance("abcd", "abcd") == 0);
+            Check("汉明距离：全异 = 64",
+                  PerceptualHash.HammingDistance("0000000000000000", "ffffffffffffffff") == 64);
+            Check("汉明距离：相差 4 bit",
+                  PerceptualHash.HammingDistance("0000000000000000", "000000000000000f") == 4);
+
+            // G5: 重扫不丢指纹（COALESCE 兜底）—— Upsert 不带 md5/phash 不应清空
+            index.Upsert(PhotoOf(basePng));   // 不带指纹
+            var after = index.FindDuplicates();
+            Check("重扫不丢指纹（COALESCE 兜底）", after.Sum(g => g.Count) == 3,
+                  $"{after.Sum(g => g.Count)} 张");
+
+            // G6: 直接塞伪造指纹，锁死"查询 + 汉明分组"逻辑（不依赖 Magick 能否算 PHash）
+            string db2 = Path.Combine(Path.GetTempPath(), "cvidx-dup2.db");
+            foreach (string f in new[] { db2, db2 + "-wal", db2 + "-shm" })
+            { try { File.Delete(f); } catch { } }
+            using var idx2 = new MediaIndex(db2);
+            idx2.Upsert(PhotoOf(@"D:\g\a.png"), md5: "m1", phash: "0000000000000000");
+            idx2.Upsert(PhotoOf(@"D:\g\b.png"), md5: "m2", phash: "000000000000000f"); // 距 4
+            idx2.Upsert(PhotoOf(@"D:\g\c.png"), md5: "m3", phash: "ffffffffffffffff"); // 距 64
+            var fakeSim = idx2.FindSimilar(10);
+            Check("伪造指纹：近距两图归一组、远图被排除",
+                  fakeSim.Count == 1 && fakeSim[0].Count == 2,
+                  $"{fakeSim.Sum(g => g.Count)} 张 / {fakeSim.Count} 组");
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    /// <summary>造一张图：底色 fill，可选在 (bx,by) 画一个黑方块。写 PNG。</summary>
+    private static void MakeImage(string path, MagickColor fill, MagickColor? block, int bx, int by)
+    {
+        using var img = new MagickImage(fill, 64, 48);
+        if (block is not null)
+        {
+            using var b = new MagickImage(block, 20, 20);
+            img.Composite(b, bx, by, CompositeOperator.Over);
+        }
+        img.Write(path);
+    }
+
+    private static PhotoInfo PhotoOf(string path) => new()
+    {
+        Path = path,
+        // 合成路径（D:\g\a.png 这种）在磁盘上不存在，不能去读 FileInfo.Length，
+        // 否则 G6 伪造指纹测试会崩。固定一个占位大小即可。
+        FileSize = 1000,
+        PixelWidth = 64,
+        PixelHeight = 48,
+        LastModified = DateTimeOffset.UtcNow,
+    };
 
     /// <summary>
     /// 造一个"v2 时期"的老库（有评分、没有 Favorite 列和 Tags 表），

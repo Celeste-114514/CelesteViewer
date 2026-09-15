@@ -99,6 +99,26 @@ public sealed class ThumbnailItem : INotifyPropertyChanged
         _multiSelected ? Visibility.Visible : Visibility.Collapsed;
 
     /// <summary>
+    /// "查找重复"模式下的"保留"标记。每组默认保留第一张，
+    /// 用户点别的图就把保留权挪过去（同一组只能留一张）。
+    /// </summary>
+    private bool _keep;
+    public bool IsKeep
+    {
+        get => _keep;
+        set
+        {
+            if (_keep == value) return;
+            _keep = value;
+            Raise(nameof(KeepBadgeVisibility));
+        }
+    }
+
+    /// <summary>"保留"角标：只在"查找重复"模式、且这张被标记为保留时出现。</summary>
+    public Visibility KeepBadgeVisibility =>
+        _keep ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>
     /// 蓝色选中框的不透明度。普通单选或都选进多选集合都显示，
     /// 用不透明度切换省掉给每个格子分配画刷。
     /// </summary>

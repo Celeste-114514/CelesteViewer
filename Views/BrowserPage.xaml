@@ -10,6 +10,119 @@
     RequestedTheme="Dark">
 
     <!--
+      缩略图格子模板：主墙（Thumbs）和"查找重复"模式里每个重复组的格子共用同一套。
+      放 Resources 是为了让代码里 new 出来的嵌套 ItemsRepeater 也能引用，
+      不用在 C# 里用 XamlReader 拼模板。
+    -->
+    <Page.Resources>
+        <DataTemplate x:Key="TileTemplate" x:DataType="views:ThumbnailItem">
+            <Grid Margin="3"
+                  Background="#FF202020"
+                  CornerRadius="6"
+                  Tapped="Thumb_Tapped"
+                  DoubleTapped="Thumb_DoubleTapped"
+                  ContextRequested="Thumb_ContextRequested">
+
+                <!-- 缩略图本体 -->
+                <Image Source="{x:Bind Thumbnail, Mode=OneWay}"
+                       Stretch="Uniform"
+                       Margin="7,7,7,26"/>
+
+                <!-- 还没解出来时的占位 -->
+                <FontIcon Glyph="&#xEB9F;"
+                          FontSize="26"
+                          Foreground="#33FFFFFF"
+                          HorizontalAlignment="Center"
+                          VerticalAlignment="Center"
+                          Visibility="{x:Bind PlaceholderVisibility, Mode=OneWay}"/>
+
+                <!-- 解不出来时的提示 -->
+                <StackPanel HorizontalAlignment="Center"
+                            VerticalAlignment="Center"
+                            Spacing="6"
+                            Visibility="{x:Bind FailedVisibility, Mode=OneWay}">
+                    <FontIcon Glyph="&#xE783;" FontSize="22" Foreground="#77FF8080"
+                              HorizontalAlignment="Center"/>
+                    <TextBlock Text="打不开" FontSize="11" Foreground="#99FF8080"
+                               HorizontalAlignment="Center"/>
+                </StackPanel>
+
+                <!-- 文件名 -->
+                <Border VerticalAlignment="Bottom"
+                        Background="#B3000000"
+                        CornerRadius="0,0,6,6"
+                        Padding="8,4"
+                        IsHitTestVisible="False">
+                    <TextBlock Text="{x:Bind FileName}"
+                               FontSize="11"
+                               Foreground="#CCFFFFFF"
+                               TextTrimming="CharacterEllipsis"/>
+                </Border>
+
+                <!--
+                  来自子文件夹时的角标。只有开了"包含子文件夹"、
+                  而且这张图确实在子目录里才出现。
+                -->
+                <Border HorizontalAlignment="Left"
+                        VerticalAlignment="Top"
+                        Background="#CC000000"
+                        CornerRadius="6,0,6,0"
+                        Padding="6,2"
+                        MaxWidth="150"
+                        IsHitTestVisible="False"
+                        Visibility="{x:Bind SubFolderVisibility, Mode=OneWay}">
+                    <TextBlock Text="{x:Bind SubFolder}"
+                               FontSize="10"
+                               Foreground="#BBFFFFFF"
+                               TextTrimming="CharacterEllipsis"/>
+                </Border>
+
+                <!-- 多选勾选角标：右上角蓝圆 + 白勾 -->
+                <Border HorizontalAlignment="Right"
+                        VerticalAlignment="Top"
+                        Margin="0,6,6,0"
+                        Width="22" Height="22"
+                        CornerRadius="11"
+                        Background="#FF4DA3FF"
+                        IsHitTestVisible="False"
+                        Visibility="{x:Bind MultiSelectedVisibility, Mode=OneWay}">
+                    <FontIcon Glyph="&#xE73E;" FontSize="12"
+                              Foreground="White"
+                              HorizontalAlignment="Center"
+                              VerticalAlignment="Center"/>
+                </Border>
+
+                <!--
+                  "保留"角标：只在"查找重复"模式里、且这张被标记为保留时出现，
+                  压在文件名条上方、左下角，方便一眼看出"这一组里留哪张"。
+                -->
+                <Border HorizontalAlignment="Left"
+                        VerticalAlignment="Bottom"
+                        Margin="0,0,0,24"
+                        Background="#CC1F7A33"
+                        CornerRadius="6,0,6,0"
+                        Padding="6,2"
+                        IsHitTestVisible="False"
+                        Visibility="{x:Bind KeepBadgeVisibility, Mode=OneWay}">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon Glyph="&#xE73E;" FontSize="10" Foreground="White"
+                                  HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        <TextBlock Text="保留" FontSize="10" Foreground="White"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- 选中框：用不透明度切换，不给每个格子分配画刷 -->
+                <Border BorderBrush="#FF4DA3FF"
+                        BorderThickness="2"
+                        CornerRadius="6"
+                        IsHitTestVisible="False"
+                        Opacity="{x:Bind SelectionOpacity, Mode=OneWay}"/>
+            </Grid>
+        </DataTemplate>
+    </Page.Resources>
+
+    <!--
       浏览界面（路线图第 3 步）：左边目录树，右边缩略图墙。
       布局上刻意用"悬浮"而不是"分栏加分隔条"：
       左边树固定宽度，不抢镜；用户想看大图时双击格子进单图页。
@@ -433,6 +546,24 @@
                             </StackPanel>
                         </ToggleButton>
 
+                        <!--
+                          查找重复：第二个"智能相册"。和"只看收藏"一样是 ToggleButton
+                          （开着 = 进入查重视图）。默认按 MD5 找精确重复；
+                          点开后用命令条里的"精确重复 / 相似图片"再切。
+                        -->
+                        <ToggleButton x:Name="DupToggle"
+                                      Padding="10,5"
+                                      VerticalAlignment="Center"
+                                      ToolTipService.ToolTip="查找重复 / 相似的图片"
+                                      Checked="DupToggle_Checked"
+                                      Unchecked="DupToggle_Unchecked">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <!-- E8C8 = Copy（两份叠一起，最贴"重复"语义） -->
+                                <FontIcon Glyph="&#xE8C8;" FontSize="13"/>
+                                <TextBlock Text="查找重复" FontSize="12"/>
+                            </StackPanel>
+                        </ToggleButton>
+
                         <Button x:Name="OpenFolderButton"
                                 Click="OpenFolderButton_Click"
                                 ToolTipService.ToolTip="打开任意文件夹（比如放在 D 盘的照片）"
@@ -501,6 +632,48 @@
                     </StackPanel>
                 </Border>
 
+                <!-- 查找重复命令条：只有进了"查找重复"模式才出现 -->
+                <Border x:Name="DupBar"
+                        Grid.Row="1"
+                        Background="#FF202020"
+                        BorderBrush="#1AFFFFFF"
+                        BorderThickness="0,0,0,1"
+                        Padding="12,7"
+                        Visibility="Collapsed">
+                    <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                        <!-- 模式切换：精确重复（MD5）/ 相似（PHash） -->
+                        <ToggleButton x:Name="DupExactToggle"
+                                      Content="精确重复"
+                                      Checked="DupExactToggle_Checked"
+                                      Unchecked="DupExactToggle_Unchecked"/>
+                        <ToggleButton x:Name="DupSimilarToggle"
+                                      Content="相似图片"
+                                      Checked="DupSimilarToggle_Checked"
+                                      Unchecked="DupSimilarToggle_Unchecked"/>
+                        <Button x:Name="DupDeleteButton"
+                                Click="DupDeleteButton_Click"
+                                ToolTipService.ToolTip="把没标「保留」的图移到回收站（可在资源管理器里还原）">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon Glyph="&#xE74D;" FontSize="13"/>
+                                <TextBlock Text="未保留的移到回收站" FontSize="12"/>
+                            </StackPanel>
+                        </Button>
+                        <TextBlock x:Name="DupStatusText"
+                                   Text="" FontSize="12"
+                                   Foreground="#A6FFFFFF"
+                                   VerticalAlignment="Center"/>
+                        <Button x:Name="DupExitButton"
+                                HorizontalAlignment="Right"
+                                Click="DupExitButton_Click"
+                                ToolTipService.ToolTip="退出查找重复">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon Glyph="&#xE8BB;" FontSize="13"/>
+                                <TextBlock Text="退出" FontSize="12"/>
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+                </Border>
+
                 <!-- 缩略图墙 -->
                 <ScrollViewer x:Name="GridScroller"
                               Grid.Row="2"
@@ -510,7 +683,9 @@
                               HorizontalScrollMode="Disabled"
                               VerticalScrollMode="Auto"
                               ContextRequested="Wall_ContextRequested">
-                    <ItemsRepeater x:Name="Thumbs" ElementPrepared="Thumbs_ElementPrepared">
+                    <ItemsRepeater x:Name="Thumbs"
+                                  ItemTemplate="{StaticResource TileTemplate}"
+                                  ElementPrepared="Thumbs_ElementPrepared">
                         <ItemsRepeater.Layout>
                             <!--
                               UniformGridLayout 是关键：它会真正回收屏幕外的格子
@@ -523,96 +698,20 @@
                                                MinRowSpacing="6"
                                                ItemsStretch="Fill"/>
                         </ItemsRepeater.Layout>
-
-                        <ItemsRepeater.ItemTemplate>
-                            <DataTemplate x:DataType="views:ThumbnailItem">
-                                <Grid Margin="3"
-                                      Background="#FF202020"
-                                      CornerRadius="6"
-                                      Tapped="Thumb_Tapped"
-                                      DoubleTapped="Thumb_DoubleTapped"
-                                      ContextRequested="Thumb_ContextRequested">
-
-                                    <!-- 缩略图本体 -->
-                                    <Image Source="{x:Bind Thumbnail, Mode=OneWay}"
-                                           Stretch="Uniform"
-                                           Margin="7,7,7,26"/>
-
-                                    <!-- 还没解出来时的占位 -->
-                                    <FontIcon Glyph="&#xEB9F;"
-                                              FontSize="26"
-                                              Foreground="#33FFFFFF"
-                                              HorizontalAlignment="Center"
-                                              VerticalAlignment="Center"
-                                              Visibility="{x:Bind PlaceholderVisibility, Mode=OneWay}"/>
-
-                                    <!-- 解不出来时的提示 -->
-                                    <StackPanel HorizontalAlignment="Center"
-                                                VerticalAlignment="Center"
-                                                Spacing="6"
-                                                Visibility="{x:Bind FailedVisibility, Mode=OneWay}">
-                                        <FontIcon Glyph="&#xE783;" FontSize="22" Foreground="#77FF8080"
-                                                  HorizontalAlignment="Center"/>
-                                        <TextBlock Text="打不开" FontSize="11" Foreground="#99FF8080"
-                                                   HorizontalAlignment="Center"/>
-                                    </StackPanel>
-
-                                    <!-- 文件名 -->
-                                    <Border VerticalAlignment="Bottom"
-                                            Background="#B3000000"
-                                            CornerRadius="0,0,6,6"
-                                            Padding="8,4"
-                                            IsHitTestVisible="False">
-                                        <TextBlock Text="{x:Bind FileName}"
-                                                   FontSize="11"
-                                                   Foreground="#CCFFFFFF"
-                                                   TextTrimming="CharacterEllipsis"/>
-                                    </Border>
-
-                                    <!--
-                                      来自子文件夹时的角标。只有开了"包含子文件夹"、
-                                      而且这张图确实在子目录里才出现 ——
-                                      一眼能看出它属于哪一层，不会以为图混进来了。
-                                    -->
-                                    <Border HorizontalAlignment="Left"
-                                            VerticalAlignment="Top"
-                                            Background="#CC000000"
-                                            CornerRadius="6,0,6,0"
-                                            Padding="6,2"
-                                            MaxWidth="150"
-                                            IsHitTestVisible="False"
-                                            Visibility="{x:Bind SubFolderVisibility, Mode=OneWay}">
-                                        <TextBlock Text="{x:Bind SubFolder}"
-                                                   FontSize="10"
-                                                   Foreground="#BBFFFFFF"
-                                                   TextTrimming="CharacterEllipsis"/>
-                                    </Border>
-
-                                    <!-- 多选勾选角标：右上角蓝圆 + 白勾 -->
-                                    <Border HorizontalAlignment="Right"
-                                            VerticalAlignment="Top"
-                                            Margin="0,6,6,0"
-                                            Width="22" Height="22"
-                                            CornerRadius="11"
-                                            Background="#FF4DA3FF"
-                                            IsHitTestVisible="False"
-                                            Visibility="{x:Bind MultiSelectedVisibility, Mode=OneWay}">
-                                        <FontIcon Glyph="&#xE73E;" FontSize="12"
-                                                  Foreground="White"
-                                                  HorizontalAlignment="Center"
-                                                  VerticalAlignment="Center"/>
-                                    </Border>
-
-                                    <!-- 选中框：用不透明度切换，不给每个格子分配画刷 -->
-                                    <Border BorderBrush="#FF4DA3FF"
-                                            BorderThickness="2"
-                                            CornerRadius="6"
-                                            IsHitTestVisible="False"
-                                            Opacity="{x:Bind SelectionOpacity, Mode=OneWay}"/>
-                                </Grid>
-                            </DataTemplate>
-                        </ItemsRepeater.ItemTemplate>
                     </ItemsRepeater>
+                </ScrollViewer>
+
+                <!--
+                  查找重复结果：进入该模式才显示，平时隐藏（和上面的主墙 GridScroller 共用 Grid.Row=2，
+                  靠 Visibility 互斥）。里面是一组一组的缩略图，由代码往 DupGroups 里填。
+                -->
+                <ScrollViewer x:Name="DupPanel"
+                              Grid.Row="2"
+                              Padding="16,12,16,12"
+                              HorizontalScrollBarVisibility="Disabled"
+                              VerticalScrollBarVisibility="Auto"
+                              Visibility="Collapsed">
+                    <StackPanel x:Name="DupGroups" Spacing="6"/>
                 </ScrollViewer>
 
                 <!-- 空状态 -->

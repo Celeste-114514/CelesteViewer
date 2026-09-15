@@ -99,6 +99,29 @@ public sealed class MagickImageDecoder : IImageDecoder
         return _formatByExt.TryGetValue(ext, out MagickFormat f) ? f : null;
     }
 
+    /// <summary>
+    /// 给 PHash 之类的下游用：这个文件 Magick 到底解不解得开。
+    /// 复用本类已有的全部判定（无委托格式、文本伪装、文件头识别、死格式黑名单），
+    /// 一处逻辑，别的地方不用再抄一遍。
+    /// </summary>
+    public static bool CanDecodeFile(string path)
+    {
+        if (IsUnsupportedNoDelegate(path)) return false;
+
+        MagickFormat? ext = FormatFor(path);
+        if (ext.HasValue) return !MagickLacks(ext.Value);
+
+        using Stream? source = ArchiveIndex.OpenSource(path);
+        if (source is null) return false;
+        if (!FileSignature.LooksLikeImage(source)) return false;
+
+        MagickFormat? kind = FromKind(FileSignature.Identify(source));
+        return kind.HasValue && !MagickLacks(kind.Value);
+    }
+
+    /// <summary>给 PHash 用的格式提示：扩展名能对应已知 MagickFormat 就返回它（用于显式指定格式读，避免裸流自探）。</summary>
+    public static MagickFormat? FormatForPath(string path) => FormatFor(path);
+
     // ---------- 2026-09-15 第三轮：彻底不留"裸流"入口 ----------
     //
     // 前两轮分别挡住了「内容是文本」和「Magick 没委托」两类，

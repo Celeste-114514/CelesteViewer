@@ -232,6 +232,50 @@ public sealed class LibraryIndexService
         catch (Exception ex) { StartupLog.Write("LibraryIndexService: 列标签失败", ex); return new List<TagEntry>(); }
     }
 
+    // ===== 重复 / 相似 =====
+
+    /// <summary>找精确重复组（MD5 相同）。索引不可用时返回空列表。</summary>
+    public List<DuplicateGroup> FindDuplicates()
+    {
+        try { return Index?.FindDuplicates() ?? new List<DuplicateGroup>(); }
+        catch (Exception ex) { StartupLog.Write("LibraryIndexService: 查重复失败", ex); return new List<DuplicateGroup>(); }
+    }
+
+    /// <summary>找视觉相似组（PHash 汉明距离 ≤ 阈值）。索引不可用时返回空列表。</summary>
+    public List<SimilarGroup> FindSimilar(int threshold = 10)
+    {
+        try { return Index?.FindSimilar(threshold) ?? new List<SimilarGroup>(); }
+        catch (Exception ex) { StartupLog.Write("LibraryIndexService: 查相似失败", ex); return new List<SimilarGroup>(); }
+    }
+
+    /// <summary>有多少组精确重复（智能相册入口红点用）。</summary>
+    public int CountDuplicates()
+    {
+        try { return Index?.CountDuplicates() ?? 0; }
+        catch (Exception ex) { StartupLog.Write("LibraryIndexService: 统计重复失败", ex); return 0; }
+    }
+
+    /// <summary>有多少组相似（默认阈值）。</summary>
+    public int CountSimilar(int threshold = 10)
+    {
+        try { return Index?.CountSimilar(threshold) ?? 0; }
+        catch (Exception ex) { StartupLog.Write("LibraryIndexService: 统计相似失败", ex); return 0; }
+    }
+
+    /// <summary>给老库 / 没算过指纹的记录补算指纹（"查找重复"首次打开时调）。索引不可用返回 0。</summary>
+    public Task<int> BackfillHashesAsync(bool computePhash = true, IProgress<int>? progress = null, CancellationToken ct = default)
+    {
+        try { return Index?.BackfillHashesAsync(computePhash, progress, ct) ?? Task.FromResult(0); }
+        catch (Exception ex) { StartupLog.Write("LibraryIndexService: 补算指纹失败", ex); return Task.FromResult(0); }
+    }
+
+    /// <summary>把一批路径从索引里删掉（"查找重复"里把图移到回收站后用，免得它们又冒出来）。</summary>
+    public void RemovePaths(IEnumerable<string> paths)
+    {
+        try { Index?.RemoveMany(paths); }
+        catch (Exception ex) { StartupLog.Write("LibraryIndexService: 删除索引记录失败", ex); }
+    }
+
     /// <summary>
     /// 把"旅行, 家人" / "旅行 家人" / "旅行；家人" 这种一行输入拆成标签列表。
     /// 用户不会乖乖只用一个分隔符，逗号空格分号全都会混着来。
