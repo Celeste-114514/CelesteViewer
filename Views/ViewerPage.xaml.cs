@@ -133,6 +133,36 @@ public sealed partial class ViewerPage : Page
             UIElement.PointerCaptureLostEvent,
             new PointerEventHandler(OnPointerCaptureLost),
             true);
+
+        RegisterHistAccelerator();
+    }
+
+    /// <summary>
+    /// H = 直方图。除了 <see cref="OnKeyDown"/> 里那条之外，**再挂一个键盘加速器**。
+    ///
+    /// 为什么两条路都要（2026-09-16 用户反馈"按 H 没反应"）：
+    /// OnKeyDown 挂在 Page 上，**事件要从有焦点的那个元素冒泡上来才算数**。
+    /// 只要焦点跑到了页面外面（点过别的窗口、内容被换过、新开的查看器还没抢到焦点），
+    /// 这条链就断，按 H 就石沉大海；而键盘加速器是**窗口级**的，
+    /// 不挑焦点，只要窗口是活动窗口就认。
+    ///
+    /// 两条路不会打架：加速器的 Invoked 在 KeyDown 之后才跑，
+    /// 而 OnKeyDown 处理 H 时会 e.Handled = true —— 处理过的事件不会再喂给加速器。
+    /// （所以 H 只留在 OnKeyDown 里一份，别两边都写 ToggleHist，那样会切两次等于没切。）
+    ///
+    /// 顺带记一条日志：用户报"按了没反应"时，看 startup.log 里有没有这一行，
+    /// 就能分清是"键没到"还是"到了但没显示出来"。
+    /// </summary>
+    private void RegisterHistAccelerator()
+    {
+        var acc = new KeyboardAccelerator { Key = Windows.System.VirtualKey.H };
+        acc.Invoked += (_, e) =>
+        {
+            e.Handled = true;   // 吞掉，避免再冒泡到别处
+            StartupLog.Write("ViewerPage: 直方图加速器(H) 命中");
+            ToggleHist();
+        };
+        Root.KeyboardAccelerators.Add(acc);
     }
 
     /// <summary>
@@ -149,10 +179,15 @@ public sealed partial class ViewerPage : Page
     /// <summary>顶部那条交给窗口当标题栏。</summary>
     public UIElement TitleBarElement => TitleBar;
 
-    /// <summary>把应用图标填到标题栏最左边（读不到就留空，不报错也不重试）。</summary>
+    /// <summary>
+    /// 把应用图标填到标题栏最左边（读不到就留空，不报错也不重试）。
+    ///
+    /// 这里取的是 TitleMark.png（单张相框、纯白）而不是主图标 AppIcon.png：
+    /// 标题栏上只有 16 逻辑像素，主图标那套"三张叠影 + 青蓝渐变"缩下去会糊成一坨蓝。
+    /// </summary>
     private async Task LoadTitleIconAsync()
     {
-        var icon = await AppIcon.LoadPngAsync();
+        var icon = await AppIcon.LoadTitleMarkAsync();
         if (icon is not null) TitleIcon.Source = icon;
     }
 
@@ -1247,7 +1282,9 @@ public sealed partial class ViewerPage : Page
                 break;
 
             case Windows.System.VirtualKey.H:
-                // H = Histogram。H 一直空着，首字母也正好对得上
+                // H = Histogram。H 一直空着，首字母也正好对得上。
+                // 这条依赖焦点在页面内；焦点跑掉时由窗口级键盘加速器兜底，
+                // 两条路都通向 ToggleHist，重复触发由它内部去重（见那里的注释）。
                 ToggleHist();
                 e.Handled = true;
                 break;
@@ -1521,9 +1558,29 @@ public sealed partial class ViewerPage : Page
     /// <summary>这次统计是给哪张图算的，用来丢弃"算完但已经翻页"的结果。</summary>
     private string? _histForPath;
 
-    private void HistButton_Click(object sender, RoutedEventArgs e) => ToggleHist();
+    /// <summary>上一次切换直方图的时刻，用来给"两条触发路径"去重（见下）。</summary>
+    private DateTime _lastHistToggle = DateTime.MinValue;
 
-    private void ToggleHist() => SetHistVisible(!_histVisible);
+    private void HistButton_Click(object sender, RoutedEventArgs e)
+    {
+        StartupLog.Write("ViewerPage: 直方图按钮 命中");
+        ToggleHist();
+    }
+
+    private void ToggleHist()
+    {
+        // ⚠️ H 键有**两条触发路径**：Page 的 KeyDown（靠焦点）和窗口级键盘加速器
+        // （不靠焦点）。同一次按键有可能两条都跑到 —— 那就变成"开完立刻关"，
+        // 用户看到的现象恰好就是"按 H 没反应"。
+        //
+        // 所以这里按时间戳去重。250ms 是权衡出来的：够长到能盖住两条路径的时差
+        // （微秒级）和按键重复，又够短到人手连按两下不会被误吞。
+        DateTime now = DateTime.UtcNow;
+        if ((now - _lastHistToggle).TotalMilliseconds < 250) return;
+        _lastHistToggle = now;
+
+        SetHistVisible(!_histVisible);
+    }
 
     private void SetHistVisible(bool visible)
     {
@@ -1532,6 +1589,13 @@ public sealed partial class ViewerPage : Page
         AnimateHistPanel(visible);
 
         if (visible) _ = RefreshHistogramAsync();
+
+        // 诊断日志：用户再报"按了没反应"时，看这行就知道是
+        // "键根本没到"（日志里没有）还是"到了但没画出来"（有这行但看不到卡片）
+        StartupLog.Write(
+            $"ViewerPage: 直方图 -> {(visible ? "开" : "关")}"
+            + $"，卡片={HistPanel.Visibility}"
+            + $"，位图={(_lastDecoded is null ? "无" : $"{_lastDecoded.PixelWidth}×{_lastDecoded.PixelHeight}")}");
     }
 
     /// <summary>

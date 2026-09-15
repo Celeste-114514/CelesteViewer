@@ -190,11 +190,49 @@ public sealed partial class BrowserPage : Page
     /// <summary>顶部那条交给窗口当标题栏（窗口能拖，右上角仍由系统画按钮）。</summary>
     public UIElement TitleBarElement => TitleBar;
 
-    /// <summary>把应用图标填到标题栏最左边（读不到就留空，不报错也不重试）。</summary>
+    /// <summary>
+    /// 把应用图标填到标题栏最左边（读不到就留空，不报错也不重试）。
+    ///
+    /// 取的是 TitleMark.png（单张相框、纯白、按 16px 优化过），不是主图标 AppIcon.png ——
+    /// 主图标是"三张叠影 + 青蓝渐变"，缩到标题栏这个尺寸会糊成一坨浅蓝。
+    /// </summary>
     private async Task LoadTitleIconAsync()
     {
-        var icon = await AppIcon.LoadPngAsync();
+        var icon = await AppIcon.LoadTitleMarkAsync();
         if (icon is not null) TitleIcon.Source = icon;
+    }
+
+    // ===== 左栏宽度（可拖拽） =====
+
+    /// <summary>
+    /// 左栏默认宽度。XAML 里 <c>TreeCol</c> 的初值也是 236，改的时候两边一起改。
+    /// </summary>
+    private const double DefaultTreeWidth = 236;
+
+    /// <summary>
+    /// 恢复上次拖出来的左栏宽度，并给分隔条接线。
+    ///
+    /// 必须在 Loaded 之后做（构造函数里 XamlRoot 还是 null）：
+    /// 分隔条算最大宽度时要用窗口宽度，那会儿取不到，会算出一个错的上限。
+    /// </summary>
+    private void RestoreTreeWidth()
+    {
+        TreeSplitter.Attach(TreeCol, DefaultTreeWidth);
+
+        // 拖动结束时才写盘。拖动过程中每一帧都写文件没必要，而且
+        // settings.txt 是整份重写的，拖一次写几十遍不值当。
+        TreeSplitter.WidthCommitted += (_, width) =>
+            AppSettings.Set("TreePaneWidth", (int)Math.Round(width));
+
+        // Attach 会把宽度重置成默认值，所以保存过的宽度要在它之后设
+        int saved = AppSettings.GetInt("TreePaneWidth", (int)DefaultTreeWidth);
+        if (saved > 0) TreeCol.Width = new GridLength(saved);
+
+        // 存下来的是"上回那个窗口宽度下"的值，这次窗口可能小得多，先重量一次
+        TreeSplitter.ReclampForWindow();
+
+        // 窗口被拖小之后，左栏不能还占着固定像素（那会把右边内容区挤没）
+        SizeChanged += (_, _) => TreeSplitter.ReclampForWindow();
     }
 
     // ===== 启动 =====
@@ -206,6 +244,8 @@ public sealed partial class BrowserPage : Page
         App.Instance?.SetCustomTitleBar(TitleBar);
         BuildTree();
         Focus(FocusState.Programmatic);
+
+        RestoreTreeWidth();
 
         // 恢复上次用的缩略图大小。放在这里而不是构造函数里，
         // 是因为构造函数阶段 XAML 还没解析完，控件都还是 null。

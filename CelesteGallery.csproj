@@ -66,6 +66,11 @@
     AppIcon.png 要给标题栏用（Image 控件的 Source），所以必须复制到输出目录；
     ico 也是，因为 SetIcon 是读文件路径的。
     风格和 CelesteMusicPlayer 保持一致：圆角方形 + 青蓝垂直渐变 + 白色图形。
+
+    TitleMark.png 是**标题栏专用的另一版图案**（单张相框、纯白、无蓝）：
+    主图标那套"三张照片叠影 + 渐变"是为大尺寸（桌面 / 任务栏）设计的，
+    缩到标题栏的 16 逻辑像素只剩一坨浅色，所以标题栏单走一张图。
+    两张图都是同一个生成脚本的兄弟产物（icon_build\make_title_mark.py）。
   -->
   <PropertyGroup>
     <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
@@ -75,6 +80,7 @@
     <Content Include="Assets\AppIcon.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="Assets\AppIcon.png" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="Assets\AppIconSource.png" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Assets\TitleMark.png" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

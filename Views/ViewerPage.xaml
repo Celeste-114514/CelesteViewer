@@ -353,13 +353,14 @@
                 Width="300"
                 HorizontalAlignment="Left"
                 VerticalAlignment="Bottom"
-                Margin="14,0,0,86"
+                Margin="14,0,0,92"
                 Background="#E61A1A1A"
                 BorderBrush="#2AFFFFFF"
                 BorderThickness="1"
                 CornerRadius="12"
                 Padding="14,12,14,10"
                 Opacity="0"
+                Canvas.ZIndex="20"
                 Visibility="Collapsed">
             <Border.RenderTransform>
                 <!-- 从下方滑入 -->
