@@ -9,33 +9,62 @@
     Title="CelesteGallery 截图">
 
     <!--
-      截图第一步：铺满整个桌面（所有显示器拼起来的那块区域，不是单个屏幕）的覆盖窗口。
+      截图覆盖层：铺满整个虚拟桌面（多显示器拼起来那一整块）。
+      框选和标注**都在这一层里完成**，全程不跳新窗口。
 
-      窗口本身没有边框也没有标题栏，客户区就是它显示的全部内容：
-      先把桌面在这一瞬间"冻"成一帧铺上去，用户在上面拖框，
-      拖完之后再把框里那块像素裁下来丢给编辑器（SnipEditorWindow）。
+      一个关键的设计决定：松手之后覆盖层不关，而是在选区上严丝合缝盖一张
+      "工作画布"（Stage），画笔/箭头/文字全都直接烙进那块像素，工具条浮在选区旁边。
+      用户在哪儿框的就还在哪儿改，视线不用重新找一个新窗口 —— 这是 QQ / 微信截图的手感。
+      （早期版本是框完关掉、另起一个居中的编辑器窗口，屏幕上"啪"地再冒一个窗口出来，
+        视觉上跳一下，很不连贯。）
 
       之所以要冻帧而不是实时抓屏：一是实时的会把这个覆盖窗口自己也截进去，
       二是鼠标划过菜单、播放器这种自带动画的界面时，内容一直在动没法选准。
+
+      ⚠️ 这个窗口里有三套坐标，改代码时别弄混：
+        · 屏幕物理像素 —— Win32 那套，可能有负数（副屏在主屏左边）；
+        · XAML 坐标 —— 鼠标事件给出来的，相对窗口左上角，单位"有效像素"；
+        · 画布像素 —— 选区那块图自己的像素，所有标注存的全是它。
+      前后两者换算收敛在 ToScreen / FromScreen，后者收敛在 StageToCanvas。
     -->
     <Grid x:Name="Root" Background="#00000000">
         <!-- 冻结的桌面那一帧 -->
         <Image x:Name="DeskImage" Stretch="Fill"/>
 
         <!--
-          选区外的压暗层。用 EvenOdd 填充规则在一个大矩形里"挖"掉中间那块，
-          比摆四个深色的 Rectangle 去拼省事，也不会因为四舍五入留下缝。
-        -->
-        <Path x:Name="MaskPath" IsHitTestVisible="False">
-            <Path.Data>
-                <GeometryGroup x:Name="MaskGroup" FillRule="EvenOdd">
-                    <RectangleGeometry x:Name="OuterGeom"/>
-                    <RectangleGeometry x:Name="InnerGeom"/>
-                </GeometryGroup>
-            </Path.Data>
-        </Path>
+          选区外的压暗层。
 
-        <!-- 鼠标底下那个窗口的范围提示（窗口模式下直接按它取整窗） -->
+          用四条（上/下/左/右）拼出来，而不是"一个大矩形里挖掉中间那块"的
+          EvenOdd 几何写法。后者看着更优雅，但实测在 WinUI 里会**整个不画**：
+          GeometryGroup 里塞一个空 Rect（没选区时内框就是空的），
+          整条 Path 的几何就变成空的，屏幕上一点压暗都没有 ——
+          而且日志一切正常，查起来极费劲。
+          四条矩形没有任何"几何失败"的余地，最多是拼缝差半像素，看不见。
+        -->
+        <Rectangle x:Name="MaskTop" Fill="#60000000" IsHitTestVisible="False"/>
+        <Rectangle x:Name="MaskBottom" Fill="#60000000" IsHitTestVisible="False"/>
+        <Rectangle x:Name="MaskLeft" Fill="#60000000" IsHitTestVisible="False"/>
+        <Rectangle x:Name="MaskRight" Fill="#60000000" IsHitTestVisible="False"/>
+
+        <!--
+          ===== 原地标注的工作层 =====
+
+          尺寸严格等于选区、位置贴着选区。里面是"选区像素 + 已经烙进去的标注"，
+          拖拽预览浮在它上面。指针事件由 Stage 接：它自己的局部坐标除以视图缩放
+          就是画布像素，跟当年那个独立编辑器窗口里的算法完全一样 ——
+          标注引擎（SnapshotDraw / PhotoMark）一行都不用改。
+
+          ⚠️ Background 不能省。WinUI 里没有背景的面板是**不接收指针事件的**，
+          下面那张 IsHitTestVisible=False 的图也顶不上，整块选区会点不动。
+          alpha=1 的黑色肉眼看不出来，但足够让它成为可命中的元素。
+        -->
+        <Grid x:Name="Stage" Background="#01000000" Visibility="Collapsed">
+            <Image x:Name="PieceImage" Stretch="Fill" IsHitTestVisible="False"/>
+            <!-- 拖拽过程中的预览（矩形/椭圆/箭头这些），松手就消失，真正画进像素 -->
+            <Canvas x:Name="Overlay" IsHitTestVisible="False"/>
+        </Grid>
+
+        <!-- 鼠标底下那个窗口的范围提示（按 W 直接取整窗） -->
         <Border x:Name="HoverBorder"
                 IsHitTestVisible="False"
                 BorderBrush="#7FC8FF"
@@ -43,14 +72,14 @@
                 Background="#12007ACC"
                 Visibility="Collapsed"/>
 
-        <!-- 当前选区 -->
+        <!-- 当前选区（压在 Stage 之上，不然会被工作画布盖住） -->
         <Border x:Name="SelBorder"
                 IsHitTestVisible="False"
                 BorderBrush="#FF2E9BFF"
                 BorderThickness="1"
                 Visibility="Collapsed"/>
 
-        <!-- 尺寸读数：贴着选区左上角飘 -->
+        <!-- 尺寸读数：框选阶段贴着鼠标飘 -->
         <Border x:Name="Readout"
                 IsHitTestVisible="False"
                 Background="#CC000000"
@@ -71,6 +100,171 @@
                     BorderBrush="#FFFFFFFF" BorderThickness="1" CornerRadius="3"/>
         </Canvas>
 
+        <!-- 取色器：跟着鼠标飘的小方块，显示指针底下那个点的颜色 -->
+        <Border x:Name="PickerTip" Visibility="Collapsed" IsHitTestVisible="False"
+                HorizontalAlignment="Left" VerticalAlignment="Top"
+                Width="74" Height="30" Background="#E6000000" CornerRadius="5"
+                BorderBrush="#59FFFFFF" BorderThickness="1" Padding="5,3">
+            <StackPanel Orientation="Horizontal" Spacing="5">
+                <Border x:Name="PickerSwatch" Width="20" Height="20" CornerRadius="3"/>
+                <TextBlock x:Name="PickerHex" FontSize="11" Foreground="White"
+                           VerticalAlignment="Center" FontFamily="Consolas"
+                           IsTextScaleFactorEnabled="False"/>
+            </StackPanel>
+        </Border>
+
+        <!-- 正在打字时的输入框。挂在 Root 上而不是 Stage 里：
+             放进 Stage 的话，点击它会被 Stage 的按下处理抢走焦点，字打不进去。 -->
+        <TextBox x:Name="TextInput" Visibility="Collapsed" MinWidth="140"
+                 HorizontalAlignment="Left" VerticalAlignment="Top"
+                 Background="#F2202020" Foreground="White" BorderBrush="#FF2E9BFF"
+                 FontSize="16" AcceptsReturn="False"/>
+
+        <!-- ===== 悬浮工具条（框选结束后才出现）===== -->
+        <Border x:Name="ToolPanel" Visibility="Collapsed"
+                Background="#F21C1C1C" BorderBrush="#33FFFFFF" BorderThickness="1"
+                CornerRadius="8" Padding="8,6">
+            <Grid>
+                <!--
+                  ⚠️ 这两列的宽度分配是**反着**的，别"顺手改成更自然的 Auto/*"。
+
+                  左边那坨（九个工具 + 九色 + 粗细 + 撤销清除）加起来九百多像素，
+                  右边那坨（取色 / 识别 / 存档 / 另存为 / 完成）三百多。
+                  如果把左边写成 Auto，ScrollViewer 会把 Auto 列撑到"内容需要多宽就多宽"，
+                  右边那列拿到 0 宽度 —— 结果就是「完成」直接消失在工具条右边缘外面，
+                  而且**界面看起来完全正常**（左边那排工具看着挺完整），
+                  只有用户想收尾的时候才发现没按钮可点。
+
+                  左边给 * 才是对的：可用空间先保证右边，剩下的归左边，
+                  装不下时左边自己出横向滚动条。
+                -->
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <ScrollViewer Grid.Column="0" HorizontalScrollBarVisibility="Auto"
+                              VerticalScrollBarVisibility="Disabled"
+                              HorizontalScrollMode="Enabled" VerticalScrollMode="Disabled"
+                              Padding="0,0,4,0">
+                    <StackPanel Orientation="Horizontal" Spacing="3">
+
+                        <!-- 选区尺寸。放在工具条最前面，跟 QQ 截图一样 ——
+                             编辑的时候用户最关心的就是"这块多大"。 -->
+                        <TextBlock x:Name="SizeText" FontSize="12" Foreground="#CCFFFFFF"
+                                   VerticalAlignment="Center" Margin="2,0,6,0"
+                                   FontFamily="Consolas" IsTextScaleFactorEnabled="False"/>
+
+                        <Border Width="1" Background="#26FFFFFF" Margin="2,2"/>
+
+                        <!-- 工具按钮由代码按 SnipTool 逐个生成，塞进这个容器。
+                             之所以不在 XAML 里写死九个按钮：每个按钮的"选中态"要跟着
+                             当前工具变，用代码生成可以共用同一套样式和点击处理。 -->
+                        <StackPanel x:Name="ToolBar" Orientation="Horizontal" Spacing="3"/>
+
+                        <Border Width="1" Background="#26FFFFFF" Margin="5,2"/>
+
+                        <!-- 颜色：九个常用色 + 一个"当前色"预览 -->
+                        <StackPanel x:Name="ColorBar" Orientation="Horizontal" Spacing="3"
+                                    VerticalAlignment="Center"/>
+
+                        <Border x:Name="CurrentColorChip" Width="22" Height="22" CornerRadius="4"
+                                BorderBrush="#59FFFFFF" BorderThickness="1" Margin="4,0,2,0"
+                                VerticalAlignment="Center" ToolTipService.ToolTip="当前颜色"/>
+
+                        <Border Width="1" Background="#26FFFFFF" Margin="5,2"/>
+
+                        <TextBlock Text="粗细" FontSize="12" Foreground="#99FFFFFF"
+                                   VerticalAlignment="Center" Margin="2,0,4,0"/>
+                        <Slider x:Name="WidthSlider" Width="80" Minimum="1" Maximum="24" StepFrequency="1"
+                                Value="3" VerticalAlignment="Center"
+                                ValueChanged="WidthSlider_ValueChanged"/>
+                        <TextBlock x:Name="WidthText" Text="3" FontSize="12" Foreground="#CCFFFFFF"
+                                   Width="18" VerticalAlignment="Center" TextAlignment="Right"
+                                   IsTextScaleFactorEnabled="False"/>
+
+                        <Border Width="1" Background="#26FFFFFF" Margin="5,2"/>
+
+                        <Button x:Name="UndoButton" Click="UndoButton_Click" Padding="8,5"
+                                Background="Transparent" BorderThickness="0"
+                                ToolTipService.ToolTip="撤销上一步（Ctrl+Z）">
+                            <TextBlock Text="撤销" FontSize="12.5" Foreground="#DCE2E2E2"/>
+                        </Button>
+                        <Button x:Name="ClearButton" Click="ClearButton_Click" Padding="8,5"
+                                Background="Transparent" BorderThickness="0"
+                                ToolTipService.ToolTip="清除全部标注">
+                            <TextBlock Text="清除" FontSize="12.5" Foreground="#DCE2E2E2"/>
+                        </Button>
+                    </StackPanel>
+                </ScrollViewer>
+
+                <!-- 右边的收尾动作 -->
+                <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right"
+                            Spacing="3" Margin="10,0,0,0">
+                    <Button x:Name="PickColorButton" Click="PickColorButton_Click" Padding="9,5"
+                            Background="Transparent" BorderThickness="0"
+                            ToolTipService.ToolTip="从图上取一个颜色当画笔颜色">
+                        <TextBlock Text="取色" FontSize="12.5" Foreground="#DCE2E2E2"/>
+                    </Button>
+                    <Button x:Name="OcrButton" Click="OcrButton_Click" Padding="9,5"
+                            Background="Transparent" BorderThickness="0"
+                            ToolTipService.ToolTip="认出图上的文字">
+                        <TextBlock Text="识别文字" FontSize="12.5" Foreground="#DCE2E2E2"/>
+                    </Button>
+
+                    <Border Width="1" Background="#26FFFFFF" Margin="5,2"/>
+
+                    <!--
+                      勾上之后，「完成」除了把图放进剪贴板，还会往截图文件夹里存一份。
+                      默认勾上：截图这个动作十有八九是要"发出去"，而"发出去之后本地还留一份"
+                      是绝大多数人想要的；不想要的时候（比如截的是敏感内容）抬手取消即可。
+                    -->
+                    <CheckBox x:Name="ArchiveSwitch" Content="存档" IsChecked="True"
+                              MinWidth="0" Margin="2,0,4,0" VerticalAlignment="Center"
+                              ToolTipService.ToolTip="点「完成」时，除了放进剪贴板，再往截图文件夹存一份"/>
+
+                    <Button x:Name="SaveAsButton" Click="SaveAsButton_Click" Padding="11,5"
+                            Background="Transparent" BorderThickness="0"
+                            ToolTipService.ToolTip="选个位置另存为图片文件">
+                        <TextBlock Text="另存为…" FontSize="12.5" Foreground="#DCE2E2E2"/>
+                    </Button>
+                    <Button x:Name="DoneButton" Click="DoneButton_Click" Padding="14,5"
+                            Background="#3A6EA5" ToolTipService.ToolTip="完成：放进剪贴板并关闭（Enter）">
+                        <TextBlock Text="完成" FontSize="12.5" Foreground="White"/>
+                    </Button>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- ===== 识别文字的结果（浮在选区旁边）===== -->
+        <Border x:Name="OcrPanel" Visibility="Collapsed"
+                Background="#F21E1E1E" BorderBrush="#33FFFFFF" BorderThickness="1"
+                CornerRadius="8">
+            <Grid Padding="12" Width="320">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Grid Grid.Row="0" Margin="0,0,0,8">
+                    <TextBlock Text="识别结果" FontSize="14" Foreground="White" FontWeight="SemiBold"
+                               VerticalAlignment="Center"/>
+                    <Button HorizontalAlignment="Right" Click="OcrClose_Click" Padding="6,2"
+                            Background="Transparent" BorderThickness="0">
+                        <TextBlock Text="✕" FontSize="13" Foreground="#99FFFFFF"/>
+                    </Button>
+                </Grid>
+                <ScrollViewer Grid.Row="1">
+                    <TextBlock x:Name="OcrText" FontSize="13" Foreground="#E6FFFFFF"
+                               TextWrapping="Wrap" IsTextSelectionEnabled="True"/>
+                </ScrollViewer>
+                <Button Grid.Row="2" Margin="0,10,0,0" HorizontalAlignment="Stretch"
+                        Click="OcrCopy_Click">
+                    <TextBlock Text="复制全部文字" FontSize="12.5"/>
+                </Button>
+            </Grid>
+        </Border>
+
         <!-- 底部提示条 -->
         <Border x:Name="HintBar"
                 HorizontalAlignment="Center"
@@ -84,7 +278,7 @@
                 IsHitTestVisible="False">
             <StackPanel Orientation="Horizontal" Spacing="12">
                 <TextBlock x:Name="ModeText" Text="矩形选区" FontSize="12" Foreground="#FFFFFF" FontWeight="SemiBold"/>
-                <TextBlock Text="·  拖拽框选，双击整屏 → 直接取；W 切整窗；Esc 取消"
+                <TextBlock x:Name="HintText" Text="拖拽框选，松手即进标注；双击取整屏；W 取当前窗口；Esc 取消"
                            FontSize="11" Foreground="#99FFFFFF"/>
             </StackPanel>
         </Border>
