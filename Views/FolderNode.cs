@@ -56,8 +56,29 @@ public sealed class FolderNode
     /// DataTemplate，模板按名字取值，名字对不上图标就不显示。
     ///
     /// 分区标题用联系人图标（和"按来源"那个维度一致，语义都是"来自哪个软件"）。
+    /// <see cref="IconOverride"/> 非空时优先用它 —— 目前只有固定的「截图」条目在用，
+    /// 它得跟工具条上那个截图按钮同一个相机图标，用户才反应得过来"这条就是我的截图"。
     /// </summary>
-    public string Glyph => IsSection ? "\uE716" : "\uE8B7";
+    public string Glyph => !string.IsNullOrEmpty(IconOverride)
+        ? IconOverride!
+        : (IsSection ? "\uE716" : "\uE8B7");
+
+    /// <summary>
+    /// 指定这一行用什么图标。留空 = 按上面的默认规则。
+    /// 只给"不是普通文件夹、但又有真实路径"的特殊条目用。
+    /// </summary>
+    public string? IconOverride { get; init; }
+
+    /// <summary>
+    /// 是不是本程序自己的截图目录那条固定条目。
+    ///
+    /// 它和图库里的普通条目有三点不一样，菜单要按这个分开处理：
+    ///   · 它**不在** library.txt 里，所以没有"从图库中移除"这一说 ——
+    ///     移除只是把它从清单里划掉，下次启动又会出现，纯属骗人；
+    ///   · 用户手动把同一个目录加进图库时，我们要靠它去重（不然左栏出现两条一样的）；
+    ///   · 它永远存在，删掉目录也还在（截图功能就在那儿）。
+    /// </summary>
+    public bool IsSnipFolder { get; init; }
 
     /// <summary>分区标题的字体小一号，看着像一段的标题而不是一个可点开的文件夹。</summary>
     public double LabelFontSize => IsSection ? 12.5 : 14;

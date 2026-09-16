@@ -189,7 +189,12 @@ public sealed partial class BrowserPage : Page
         // 事件是静态的，所以必须成对地挂钩 / 摘钩（见 Unloaded）——
         // 只挂不摘的话，页面被回收之后事件还攥着它，那一格就永远刷不掉了。
         HookEditsChanged();
-        Unloaded += (_, _) => UnhookEditsChanged();
+        HookSnipSaved();
+        Unloaded += (_, _) =>
+        {
+            UnhookEditsChanged();
+            UnhookSnipSaved();
+        };
 
         Root.AllowDrop = true;
         Root.DragOver += Root_DragOver;
@@ -253,6 +258,7 @@ public sealed partial class BrowserPage : Page
         // 页面被卸载过一次又装回来时（换主题、被移出可视树再放回）要把订阅补上。
         // 带自锁，重复调用不会挂两遍 —— 挂两遍会让一次编辑刷两次格子。
         HookEditsChanged();
+        HookSnipSaved();
 
         // 后台先把"哪些图编辑过"读进内存。缩略图墙每一格都要问它一次，
         // 不能等到第一屏几十个格子一起问的时候才现查库。
@@ -386,6 +392,10 @@ public sealed partial class BrowserPage : Page
         var social = new List<string>();
         foreach (string folder in folders)
         {
+            // 用户如果把截图目录也手动加进过图库，这里跳过 ——
+            // 上面那条固定的已经指到同一个地方了，再来一条就是重复行。
+            if (SnipStore.IsRoot(folder)) continue;
+
             if (!Directory.Exists(folder))
             {
                 StartupLog.Write($"BrowserPage: 图库条目暂时不可用 → {folder}");
@@ -397,6 +407,11 @@ public sealed partial class BrowserPage : Page
         }
 
         int shown = 0;
+
+        // 「截图」这一条固定挂在最前面。
+        // 它代表的是本程序自己截的图，是功能的一部分，不是"用户收进图库的某个目录"，
+        // 所以它不在 library.txt 里、也没有"从图库中移除"这一说。
+        if (AddSnipNode()) shown++;
 
         foreach (string folder in normal)
         {
@@ -446,6 +461,50 @@ public sealed partial class BrowserPage : Page
         var node = MakeNode(folder, label: label, inLibrary: true);
         _libraryNodes.Add(node);
         _libraryRoot!.Children.Add(node);
+    }
+
+    /// <summary>
+    /// 挂上那条固定的「截图」条目，指到本程序自己的截图目录（见 <see cref="SnipStore"/>）。
+    ///
+    /// 为什么值得给它一条固定位置，而不是"让用户自己把那个文件夹加进图库"：
+    /// 截图是本程序的核心功能之一，用户截完图之后**必然**会想"我刚截的在哪"。
+    /// 让答案永远是"左栏最上面那条"，比让他记住当初到底加没加、加的是哪个目录好得多。
+    ///
+    /// 目录会**先建出来**再挂：不存在的话点进去会因为
+    /// <c>Directory.Exists</c> 为假而毫无反应，看起来像坏了。
+    ///
+    /// 返回是否真的挂上（目录都建不出来就算了，不值得为它报错弹框）。
+    /// </summary>
+    private bool AddSnipNode()
+    {
+        try
+        {
+            string root = SnipStore.EnsureRoot();
+            if (!Directory.Exists(root)) return false;
+
+            var node = new TreeViewNode
+            {
+                Content = new FolderNode
+                {
+                    Path = root,
+                    Label = "截图",
+                    // 和工具条上那个截图按钮同一个相机图标，一眼能对上
+                    IconOverride = "\uE722",
+                    IsSnipFolder = true,
+                },
+                // 截图目录是平铺的，没有子目录可展开
+                HasUnrealizedChildren = false,
+            };
+
+            _libraryNodes.Add(node);
+            _libraryRoot!.Children.Add(node);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            StartupLog.Write("BrowserPage: 挂「截图」条目失败", ex);
+            return false;
+        }
     }
 
     /// <summary>
@@ -658,17 +717,28 @@ public sealed partial class BrowserPage : Page
     {
         TreeViewNode? fallback = null;
 
-        foreach (var node in _libraryNodes)
-        {
-            fallback ??= node;
+        // 按**树上的先后顺序**走，不用 _libraryNodes ——
+        // 那是个 HashSet，遍历顺序没有保证，兜底会落到哪一条全看运气。
+        // 树上的顺序才是用户看到的顺序，兜底选第一条最符合直觉。
+        var nodes = _libraryRoot is not null && _libraryRoot.Children.Count > 0
+            ? _libraryRoot.Children
+            : (IEnumerable<TreeViewNode>)_libraryNodes;
 
-            if (_currentFolder is not null
-                && node.Content is FolderNode info
-                && PathEquals(info.Path, _currentFolder))
+        foreach (var node in nodes)
+        {
+            if (node.Content is not FolderNode info) continue;
+
+            if (_currentFolder is not null && PathEquals(info.Path, _currentFolder))
             {
                 FolderTree.SelectedNode = node;
                 return;
             }
+
+            // 没有"当前目录"（首次启动、或上次看的目录没了）时兜底选第一条。
+            // 「截图」那条虽然排在最前面，但不拿它当默认落点：
+            // 刚打开软件，用户想看的多半是自己的照片，不是昨天的截图。
+            if (fallback is null && !info.IsSnipFolder && !info.IsSection && !info.IsRoot)
+                fallback = node;
         }
 
         if (fallback is not null) FolderTree.SelectedNode = fallback;
@@ -826,6 +896,15 @@ public sealed partial class BrowserPage : Page
         flyout.Items.Add(MakeMenuItem("在资源管理器中打开", "\uE838", () => ExplorerHelper.OpenFolder(path)));
         flyout.Items.Add(MakeMenuItem("复制路径", "\uE8C8", () => SetClipboardText(path)));
         flyout.Items.Add(new MenuFlyoutSeparator());
+
+        // 「截图」那条到这儿为止。它不在 library.txt 里，所以既没有"从图库中移除"，
+        // 也不该有"加入图库" —— 那两个动作都会让用户以为能改什么，其实改不了。
+        // "重新读取子目录"同理：它底下是平铺的截图，没有子目录可读。
+        if (info.IsSnipFolder)
+        {
+            flyout.Items.Add(MakeMenuItem("再截一张", "\uE722", () => Helpers.SnipLauncher.Launch(App.Instance)));
+            return flyout;
+        }
 
         if (info.InLibrary)
             flyout.Items.Add(MakeMenuItem("从图库中移除", "\uE74D", () => RemoveFromLibrary(path)));
@@ -2081,35 +2160,16 @@ public sealed partial class BrowserPage : Page
         => AboutWindow.Show();
 
     /// <summary>
-    /// "截图"：先铺一层冻结桌面的覆盖层让用户框选，再进标注编辑器。
+    /// "截图"：先铺一层冻结桌面的覆盖层让用户框选，框完**就地**标注，全程一个窗口。
     ///
-    /// 本程序自己是截图工具，不需要外挂 —— 框选走 SnipWindow，
-    /// 标注走 SnipEditorWindow，两条腿都在自己的代码里，行为可控。
+    /// 本程序自己是截图工具，不需要外挂 —— 框选和标注都在 SnipWindow 里，
+    /// 两条腿都在自己的代码里，行为可控。
     /// </summary>
-    private async void SnipButton_Click(object sender, RoutedEventArgs e)
+    private void SnipButton_Click(object sender, RoutedEventArgs e)
     {
-        try
-        {
-            if (App.Instance is null) return;
-            IntPtr hwnd = WinRT.Interop.WindowNative.GetWindowHandle(App.Instance);
-
-            // 本程序窗口摆在桌面上，直接抓屏会把自己的界面也抓进去，
-            // 所以先藏起来（QQ / 微信截图都是这个行为）。
-            Helpers.WindowForeground.Hide(hwnd);
-
-            // 藏完要等一小会儿才抓：ShowWindow 只是给系统发了个请求，
-            // 真正从屏幕上消失、DWM 的合成结果稳定下来还要一两帧。
-            // 不等的话抓到的仍是"带着自己界面的那一帧"。
-            await System.Threading.Tasks.Task.Delay(220);
-
-            // 截完了再把主窗口放回来 —— 覆盖层关掉才放，
-            // 提前放会挡在冻结画面上面。
-            SnipWindow.Start(() => Helpers.WindowForeground.BringToFront(hwnd));
-        }
-        catch (Exception ex)
-        {
-            Services.StartupLog.Write("启动截图失败", ex);
-        }
+        // 具体步骤（藏自己 → 抓屏 → 框选 → 完事放回来）都收在 SnipLauncher 里，
+        // 托盘菜单和全局热键走同一个入口，免得三处各写一份、迟早走样
+        Helpers.SnipLauncher.Launch(App.Instance);
     }
 
     /// <summary>
@@ -2273,6 +2333,73 @@ public sealed partial class BrowserPage : Page
 
     /// <summary>是不是已经挂上 <see cref="LibraryIndexService.EditsChanged"/> 了。</summary>
     private bool _editsHooked;
+
+    // ===== 截图存好了 =====
+
+    private bool _snipHooked;
+
+    /// <summary>
+    /// 订阅"截图存档了"。
+    ///
+    /// 编辑器是**独立窗口**、托盘和全局热键又是另外两条入口，它们都拿不到本页面的引用。
+    /// 所以走一条静态通知：谁存的谁举手，这里接住。
+    /// 和 EditsChanged 一样是静态事件，必须成对挂钩/摘钩，不然页面被回收之后还攥着它。
+    /// </summary>
+    private void HookSnipSaved()
+    {
+        if (_snipHooked) return;
+        SnipStore.Saved += OnSnipSaved;
+        _snipHooked = true;
+    }
+
+    private void UnhookSnipSaved()
+    {
+        if (!_snipHooked) return;
+        SnipStore.Saved -= OnSnipSaved;
+        _snipHooked = false;
+    }
+
+    /// <summary>
+    /// 存好一张截图之后该做点什么。
+    ///
+    /// 两种情况要管：
+    ///   1. 左栏还没有「截图」那条 —— 头一回截图才会建出那个目录，
+    ///      建出来之后树得重建一次，否则用户永远看不见它（要重启才有）；
+    ///   2. 用户正停在截图文件夹里 —— 墙上得立刻多出刚截的那张，
+    ///      不然他会以为没存上。
+    ///
+    /// 通知是从**存文件的那个线程**发出来的，不是 UI 线程，所以整段都得丢回去。
+    /// </summary>
+    private void OnSnipSaved(string path)
+    {
+        try
+        {
+            _uiQueue?.TryEnqueue(() =>
+            {
+                try
+                {
+                    if (!HasSnipNode()) BuildTree();
+                    else if (_currentFolder is not null && SnipStore.IsRoot(_currentFolder))
+                        _ = LoadFolderAsync(_currentFolder);
+
+                    StartupLog.Write($"BrowserPage: 截图已存档 → {path}");
+                }
+                catch (Exception ex)
+                {
+                    StartupLog.Write("BrowserPage: 截图存档后刷新失败", ex);
+                }
+            });
+        }
+        catch { }
+    }
+
+    /// <summary>左栏里已经挂着「截图」那条了吗。</summary>
+    private bool HasSnipNode()
+    {
+        foreach (var node in _libraryNodes)
+            if (node.Content is FolderNode info && info.IsSnipFolder) return true;
+        return false;
+    }
 
     private void RefreshEditedTile(string path)
     {

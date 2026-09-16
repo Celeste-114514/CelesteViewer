@@ -82,6 +82,31 @@ namespace CelesteGallery
                 _window.Activate();
                 StartupLog.Write("主窗口已显示 —— 启动流程走完");
 
+                // 托盘图标 + 全局截图热键。
+                //
+                // 放在主窗口出来之后再起：热键触发时要把主窗口藏起来再抓屏，
+                // 主窗口还不存在的话那一步没意义。失败也不影响程序使用，
+                // 只是"截图得从主界面里点"而已（原因写在 SnipTray.Failure 里）。
+                try
+                {
+                    Helpers.SnipTray.Start(
+                        Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread(),
+                        onSnip: () => Helpers.SnipLauncher.Launch(Instance),
+                        onShow: ShowMainWindow,
+                        onExit: () =>
+                        {
+                            // 先摘托盘图标再退。不摘的话图标会一直挂在托盘上，
+                            // 直到用户把鼠标划过去才消失 —— 看着像"退不干净"
+                            Helpers.SnipTray.Stop();
+                            Application.Current?.Exit();
+                        });
+                    StartupLog.Write("托盘/热键：已请求启动（热键是否抢到由后台线程另行打印）");
+                }
+                catch (Exception ex)
+                {
+                    StartupLog.Write("托盘/热键：启动失败（不影响其它功能）", ex);
+                }
+
                 // 启动后顺手查一次更新（CelesteMusicPlayer 同款机制）。
                 //
                 // 刻意等 5 秒：启动头几秒在扫目录、建缩略图，别抢资源；
@@ -107,6 +132,29 @@ namespace CelesteGallery
             {
                 StartupLog.Write("【致命】创建主窗口失败", ex);
                 throw;
+            }
+        }
+
+        /// <summary>
+        /// 把主窗口叫到最前面。
+        ///
+        /// 两个地方要用：托盘菜单点「显示主窗口」（主窗口可能被藏起来了，
+        /// 也可能只是被别的程序盖住了），以及截图流程结束之后还原。
+        /// 光调 Activate() 对付不了"被别的窗口盖住"的情形，得让 Win32 硬抬一次。
+        /// </summary>
+        internal static void ShowMainWindow()
+        {
+            try
+            {
+                var w = Instance;
+                if (w is null) return;
+
+                w.Activate();
+                Helpers.WindowForeground.BringToFront(WinRT.Interop.WindowNative.GetWindowHandle(w));
+            }
+            catch (Exception ex)
+            {
+                StartupLog.Write("显示主窗口失败（不影响使用）", ex);
             }
         }
     }

@@ -380,6 +380,16 @@ public static class ScreenCapture
         int got = Native.GetDIBits(memDc, bmp, 0, (uint)height, pixels, ref bi, 0);
         if (got == 0) return null;
 
+        // ⚠️ 必须自己把 alpha 补成 255。
+        //
+        // GDI 抓屏给出的是"32 位 BGRA"，但那个第 4 字节在 BI_RGB 下是**未定义**的
+        // （实测一律是 0）。把它当 alpha 用就会出大问题：
+        //   · 交给 SoftwareBitmap(BitmapAlphaMode.Premultiplied) → 整张图判定为全透明，
+        //     界面上什么都看不见，日志却一切正常（踩过这个坑）；
+        //   · 交给 Magick 按 BGRA 解码 → 存出来的 PNG 是一片透明。
+        // 抓屏结果本来就是不透明的，"补成 255"不是猜，是事实。
+        for (int i = 3; i < pixels.Length; i += 4) pixels[i] = 255;
+
         return new CapturedFrame(pixels, width, height, stride, SystemScale);
     }
 
