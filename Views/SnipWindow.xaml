@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="CelesteGallery.Views.SnipWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Title="CelesteGallery 截图">
+
+    <!--
+      截图第一步：铺满整个桌面（所有显示器拼起来的那块区域，不是单个屏幕）的覆盖窗口。
+
+      窗口本身没有边框也没有标题栏，客户区就是它显示的全部内容：
+      先把桌面在这一瞬间"冻"成一帧铺上去，用户在上面拖框，
+      拖完之后再把框里那块像素裁下来丢给编辑器（SnipEditorWindow）。
+
+      之所以要冻帧而不是实时抓屏：一是实时的会把这个覆盖窗口自己也截进去，
+      二是鼠标划过菜单、播放器这种自带动画的界面时，内容一直在动没法选准。
+    -->
+    <Grid x:Name="Root" Background="#00000000">
+        <!-- 冻结的桌面那一帧 -->
+        <Image x:Name="DeskImage" Stretch="Fill"/>
+
+        <!--
+          选区外的压暗层。用 EvenOdd 填充规则在一个大矩形里"挖"掉中间那块，
+          比摆四个深色的 Rectangle 去拼省事，也不会因为四舍五入留下缝。
+        -->
+        <Path x:Name="MaskPath" IsHitTestVisible="False">
+            <Path.Data>
+                <GeometryGroup x:Name="MaskGroup" FillRule="EvenOdd">
+                    <RectangleGeometry x:Name="OuterGeom"/>
+                    <RectangleGeometry x:Name="InnerGeom"/>
+                </GeometryGroup>
+            </Path.Data>
+        </Path>
+
+        <!-- 鼠标底下那个窗口的范围提示（窗口模式下直接按它取整窗） -->
+        <Border x:Name="HoverBorder"
+                IsHitTestVisible="False"
+                BorderBrush="#7FC8FF"
+                BorderThickness="2"
+                Background="#12007ACC"
+                Visibility="Collapsed"/>
+
+        <!-- 当前选区 -->
+        <Border x:Name="SelBorder"
+                IsHitTestVisible="False"
+                BorderBrush="#FF2E9BFF"
+                BorderThickness="1"
+                Visibility="Collapsed"/>
+
+        <!-- 尺寸读数：贴着选区左上角飘 -->
+        <Border x:Name="Readout"
+                IsHitTestVisible="False"
+                Background="#CC000000"
+                CornerRadius="4"
+                Padding="7,3"
+                Visibility="Collapsed">
+            <TextBlock x:Name="ReadoutText" FontSize="12" Foreground="White"
+                       FontFamily="Consolas" IsTextScaleFactorEnabled="False"/>
+        </Border>
+
+        <!-- 放大镜 -->
+        <Canvas x:Name="Loupe" Width="168" Height="120" IsHitTestVisible="False"
+                Visibility="Collapsed" HorizontalAlignment="Left" VerticalAlignment="Top">
+            <Image x:Name="LoupeImage" Stretch="None"/>
+            <Rectangle x:Name="LoupeCrossV" Width="1" Height="120" Fill="#80FF3B30"/>
+            <Rectangle x:Name="LoupeCrossH" Width="168" Height="1" Fill="#80FF3B30"/>
+            <Border Canvas.Left="0" Canvas.Top="0" Width="168" Height="120"
+                    BorderBrush="#FFFFFFFF" BorderThickness="1" CornerRadius="3"/>
+        </Canvas>
+
+        <!-- 底部提示条 -->
+        <Border x:Name="HintBar"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Bottom"
+                Margin="0,0,0,18"
+                Background="#E61C1C1C"
+                BorderBrush="#33FFFFFF"
+                BorderThickness="1"
+                CornerRadius="8"
+                Padding="14,8"
+                IsHitTestVisible="False">
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <TextBlock x:Name="ModeText" Text="矩形选区" FontSize="12" Foreground="#FFFFFF" FontWeight="SemiBold"/>
+                <TextBlock Text="·  拖拽框选，双击整屏 → 直接取；W 切整窗；Esc 取消"
+                           FontSize="11" Foreground="#99FFFFFF"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

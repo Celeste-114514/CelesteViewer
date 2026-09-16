@@ -2081,6 +2081,38 @@ public sealed partial class BrowserPage : Page
         => AboutWindow.Show();
 
     /// <summary>
+    /// "截图"：先铺一层冻结桌面的覆盖层让用户框选，再进标注编辑器。
+    ///
+    /// 本程序自己是截图工具，不需要外挂 —— 框选走 SnipWindow，
+    /// 标注走 SnipEditorWindow，两条腿都在自己的代码里，行为可控。
+    /// </summary>
+    private async void SnipButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (App.Instance is null) return;
+            IntPtr hwnd = WinRT.Interop.WindowNative.GetWindowHandle(App.Instance);
+
+            // 本程序窗口摆在桌面上，直接抓屏会把自己的界面也抓进去，
+            // 所以先藏起来（QQ / 微信截图都是这个行为）。
+            Helpers.WindowForeground.Hide(hwnd);
+
+            // 藏完要等一小会儿才抓：ShowWindow 只是给系统发了个请求，
+            // 真正从屏幕上消失、DWM 的合成结果稳定下来还要一两帧。
+            // 不等的话抓到的仍是"带着自己界面的那一帧"。
+            await System.Threading.Tasks.Task.Delay(220);
+
+            // 截完了再把主窗口放回来 —— 覆盖层关掉才放，
+            // 提前放会挡在冻结画面上面。
+            SnipWindow.Start(() => Helpers.WindowForeground.BringToFront(hwnd));
+        }
+        catch (Exception ex)
+        {
+            Services.StartupLog.Write("启动截图失败", ex);
+        }
+    }
+
+    /// <summary>
     /// "文件关联"：把图片格式的"双击打开"交给本程序。
     /// 做法和 CelesteMusicPlayer 那个一致 —— 弹一个按类别勾选格式的窗口，
     /// 用户勾完点「应用」才真正写注册表。

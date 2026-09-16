@@ -30,6 +30,7 @@ namespace CelesteGallery.Helpers;
 internal static class WindowForeground
 {
     private const int SW_RESTORE = 9;
+    private const int SW_HIDE = 0;
 
     private const uint SWP_NOSIZE = 0x0001;
     private const uint SWP_NOMOVE = 0x0002;
@@ -54,6 +55,23 @@ internal static class WindowForeground
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool ShowWindow(IntPtr hWnd, int cmdShow);
+
+    /// <summary>
+    /// 把窗口从屏幕上收起来（不是最小化，是彻底不画）。
+    ///
+    /// 截图前必须调它：本程序自己就是截图工具，窗口摆在桌面上不藏起来的话，
+    /// 抓屏会把"自己的界面"也抓进去（QQ / 微信截图都是先把自己藏掉的）。
+    ///
+    /// 为什么不干脆最小化：最小化会让窗口跑到任务栏，用户截完图想接着用时
+    /// 还得再去点一下任务栏把它捞回来；隐藏则是原地消失原地回来。
+    /// 隐藏也不影响窗口状态 —— 最大化着隐藏，<see cref="BringToFront"/> 之后还是最大化。
+    /// </summary>
+    public static void Hide(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return;
+        try { ShowWindow(hwnd, SW_HIDE); }
+        catch { /* 藏不起来顶多截进去自己，不该让截图整个失败 */ }
+    }
 
     /// <summary>抬到最前 + 抢到前台。抬不起来就安静地算了。</summary>
     public static void BringToFront(IntPtr hwnd)

@@ -394,6 +394,19 @@
                                 <!-- E710 = Add -->
                                 <FontIcon Glyph="&#xE710;" FontSize="17"/>
                             </Button>
+                            <!--
+                              "截图"：框选屏幕 → 标注 → 存文件或直接进剪贴板。
+                              放在图库这一排是因为它和"看图"是并列的日常动作，
+                              不属于任何看图模式，别藏进右键菜单里。
+                            -->
+                            <Button x:Name="SnipButton"
+                                    Click="SnipButton_Click"
+                                    Width="30" Height="30" Padding="0"
+                                    Background="Transparent" BorderThickness="0"
+                                    ToolTipService.ToolTip="截图（框选屏幕，可标注、可识别文字）">
+                                <!-- E722 = Camera -->
+                                <FontIcon Glyph="&#xE722;" FontSize="16"/>
+                            </Button>
                         </StackPanel>
                     </Grid>
 
